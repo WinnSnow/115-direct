@@ -107,4 +107,6 @@ Jellyfin 客户端必须通过 `9096` 网关访问。网关保留普通 Jellyfin
 
 MIT。115driver 作为独立 MIT 依赖使用；本项目未复制 CloudMediaSync 或无明确许可证项目的代码。
 
-## 社区 [LINXUDO](https://linux.do)
+## 社区 
+
+[LINXUDO](https://linux.do)
