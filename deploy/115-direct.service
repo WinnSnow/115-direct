@@ -1,0 +1,29 @@
+[Unit]
+Description=115 Direct media organizer and Jellyfin gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=115-direct
+Group=115-direct
+EnvironmentFile=-/etc/115-direct.env
+Environment=DATA_DIR=/var/lib/115-direct
+Environment=STRM_PATH=/srv/115-direct/strm
+Environment=PENDING_PATH=/srv/115-direct/pending
+Environment=UPLOAD_PATH=/srv/115-direct/upload
+Environment=LISTEN_ADDR=:9527
+Environment=GATEWAY_ADDR=:9096
+ExecStart=/opt/115-direct/115-direct
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/115-direct /srv/115-direct/strm /srv/115-direct/pending /srv/115-direct/upload
+AmbientCapabilities=
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

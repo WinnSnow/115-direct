@@ -1,0 +1,47 @@
+services:
+  direct:
+    build: .
+    image: 115-direct:local
+    container_name: 115-direct
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      PUBLIC_GATEWAY_URL: ${PUBLIC_GATEWAY_URL:-http://127.0.0.1:9096}
+      MASTER_KEY_PATH: /data/master.key
+      STRM_PATH: /media/115-strm
+      PENDING_PATH: /media/115-pending
+      UPLOAD_PATH: /media/115-upload
+      LISTEN_ADDR: ":9527"
+      GATEWAY_ADDR: ":9096"
+      CMS_LEGACY_ADDR: ":9528"
+    ports:
+      - "${ADMIN_PORT:-9527}:9527"
+      - "${GATEWAY_PORT:-9096}:9096"
+      - "${CMS_LEGACY_BIND:-127.0.0.1}:${CMS_LEGACY_PORT:-19528}:9528"
+    volumes:
+      - ./data:/data
+      - ${STRM_HOST_PATH:-./media/115-strm}:/media/115-strm
+      - ${PENDING_HOST_PATH:-./media/115-pending}:/media/115-pending
+      - ${UPLOAD_HOST_PATH:-./media/115-upload}:/media/115-upload
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/115-direct", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  jellyfin:
+    image: jellyfin/jellyfin@sha256:78d3ea1207d1322471fcac39a614f004f2ccf7e878f95ab2977d752f07e4dd7e
+    container_name: 115-direct-jellyfin
+    restart: unless-stopped
+    profiles: ["local-jellyfin"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${JELLYFIN_PORT:-8096}:8096"
+    volumes:
+      - ./data/jellyfin/config:/config
+      - ./data/jellyfin/cache:/cache
+      - ${STRM_HOST_PATH:-./media/115-strm}:/media/115-strm:ro

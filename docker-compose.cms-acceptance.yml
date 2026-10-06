@@ -1,0 +1,15 @@
+# First-round test only. No production mounts, workers, or 115 credentials.
+services:
+  cms-acceptance:
+    image: 115-direct:cms-acceptance-final-20261001
+    container_name: 115-direct-cms-acceptance
+    restart: "no"
+    ports:
+      - "127.0.0.1:29527:9527"
+      - "127.0.0.1:29096:9096"
+    volumes:
+      - ${CMS_ACCEPTANCE_DIR:-/var/tmp/115-direct-cms-acceptance}:/data
+    command:
+      - "-backend=http://jellyfin.example.test:8091"
+      - "-cms=http://cms.example.test:9527"
+      - "-public=http://127.0.0.1:29096"

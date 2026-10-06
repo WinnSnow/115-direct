@@ -1,0 +1,5 @@
+services:
+  direct:
+    volumes: !override
+      - ./data:/data
+      - ${MEDIA_HOST_PATH:-./media}:/media

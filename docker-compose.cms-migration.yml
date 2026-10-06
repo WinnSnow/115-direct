@@ -1,0 +1,6 @@
+# 使用：docker compose -f docker-compose.yml -f docker-compose.cms-migration.yml up -d direct
+# 现有Jellyfin保持原部署；不启用local-jellyfin profile。
+services:
+  direct:
+    volumes:
+      - ${CMS_STRM_HOST_PATH:?set CMS_STRM_HOST_PATH}:/mnt/cms-media:ro

@@ -1,0 +1,41 @@
+services:
+  direct:
+    image: 115-direct:latest
+    container_name: direct
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      DATA_DIR: /data
+      STRM_PATH: /strm
+      PENDING_PATH: /pending
+      UPLOAD_PATH: /upload
+      LISTEN_ADDR: ":9527"
+      GATEWAY_ADDR: ":9096"
+      CMS_LEGACY_ADDR: ":9528"
+      PUBLIC_GATEWAY_URL: ${PUBLIC_GATEWAY_URL:-http://direct:9096}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD}
+    ports:
+      - "${DIRECT_ADMIN_PORT:-9527}:9527"
+      - "${DIRECT_GATEWAY_PORT:-9096}:9096"
+      - "${CMS_LEGACY_PORT:-9528}:9528"
+    volumes:
+      - ${HOST_DATA:?set HOST_DATA}:/data
+      - ${HOST_MEDIA_ROOT:?set HOST_MEDIA_ROOT}:/legacy-media:ro
+      - ${HOST_PENDING:?set HOST_PENDING}:/pending
+      - ${HOST_STRM:?set HOST_STRM}:/strm
+      - ${HOST_UPLOAD:?set HOST_UPLOAD}:/upload
+
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    profiles: ["local-jellyfin"]
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${JELLYFIN_PORT:-8096}:8096"
+    volumes:
+      - ${HOST_JELLYFIN_CONFIG:?set HOST_JELLYFIN_CONFIG}:/config
+      - ${HOST_JELLYFIN_CACHE:?set HOST_JELLYFIN_CACHE}:/cache
+      - ${HOST_MEDIA_ROOT:?set HOST_MEDIA_ROOT}:/媒体库:ro
+      - ${HOST_STRM:?set HOST_STRM}:/media/115-strm:ro
