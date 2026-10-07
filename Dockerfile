@@ -20,7 +20,7 @@ RUN apk add --no-cache ca-certificates tzdata su-exec && addgroup -g 1000 app &&
 WORKDIR /app
 COPY --from=builder /out/115-direct /usr/local/bin/115-direct
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN mkdir -p /data/strm && chown -R app:app /data
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh && mkdir -p /data/strm && chown -R app:app /data
 ENV DATA_DIR=/data TZ=Asia/Shanghai
 VOLUME ["/data"]
 EXPOSE 9527 9096 9528
