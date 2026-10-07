@@ -415,7 +415,23 @@ async function loadJobs() {
   if (jobsRequest) return jobsRequest
   jobsRequest = (async () => {
     const value = await request<{ items: Job[] }>('/api/v1/transfers')
-    state.jobs = (value.items || []).map(localJob)
+    const previous = new Map(state.jobs.map(job => [job.id, job]))
+    state.jobs = (value.items || []).map(raw => {
+      const job = localJob(raw)
+      const old = previous.get(job.id)
+      // Keep an expanded row's already projected paths while the ten-second
+      // refresh replaces the job objects. A status or identity change clears
+      // the cache so a completed manual operation is projected again.
+      if (old && old.status === job.status && old.createdAt === job.createdAt && old.title === job.title && old.kind === job.kind && old.tmdbId === job.tmdbId) {
+        job.cloudSourcePath = old.cloudSourcePath
+        job.cloudTargetPath = old.cloudTargetPath
+        job.cloudLoaded = old.cloudLoaded
+        // The request belongs to the old object. Let the refreshed object
+        // start its own request instead of inheriting a stuck loading flag.
+        job.cloudLoading = false
+      }
+      return job
+    })
     state.stats.jobs = state.jobs.length
     state.stats.pending = state.jobs.filter(job => !['completed', 'cleaned', 'success'].includes(job.status)).length
     state.stats.failed = state.jobs.filter(job => job.status === 'failed').length

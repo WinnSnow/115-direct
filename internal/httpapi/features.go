@@ -180,20 +180,33 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 
 	for i := range items {
 		item := &items[i]
+		kind := item.Kind
+		if kind == "" {
+			kind = job.TMDBKind
+		}
 		relative := sources[item.ID]
 		if relative != "" {
 			root := item.InboxID
 			if root == "" {
 				root = job.StageCID
 			}
+			itemStageName := stageName
 			if s.Pan != nil {
-				stageName = cloudStageName(ctx, s.Pan, cfg.InboxCID, root)
+				itemStageName = cloudStageName(ctx, s.Pan, cfg.InboxCID, root)
 			}
 			parts := []string{inboxRoot}
-			if stageName != "" {
-				parts = append(parts, stageName)
+			if kind == "tv" && itemStageName != "" {
+				parts = append(parts, cloudTVSourceFolder(itemStageName, relative))
+			} else if kind == "tv" {
+				parts = append(parts, firstCloudPathPart(relative))
+			} else if itemStageName != "" {
+				parts = append(parts, itemStageName)
+			} else {
+				parts = append(parts, relative)
 			}
-			parts = append(parts, relative)
+			if kind != "tv" && itemStageName != "" {
+				parts = append(parts, relative)
+			}
 			item.CloudSourcePath = cloudJoin(parts...)
 		}
 		targetRelative := item.CloudTargetPath
@@ -203,12 +216,47 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 			}
 		}
 		if targetRelative != "" {
+			if kind == "tv" {
+				targetRelative = cloudTVFolder(targetRelative)
+			}
 			item.CloudTargetPath = cloudJoin(libraryRoot, targetRelative)
 		}
 		if item.CloudSourcePath != "" || item.CloudTargetPath != "" {
 			item.CloudOperation = cloudOperation(job.Source)
 		}
 	}
+}
+
+func firstCloudPathPart(value string) string {
+	parts := strings.Split(strings.Trim(strings.ReplaceAll(value, "\\", "/"), "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
+func cloudTVSourceFolder(stageName, relative string) string {
+	base := strings.TrimSpace(strings.SplitN(stageName, " [接收中-", 2)[0])
+	if strings.Contains(stageName, " [接收中-") {
+		if first := firstCloudPathPart(relative); first != "" && !strings.HasPrefix(strings.ToLower(first), "season ") {
+			return first
+		}
+	}
+	if base != "" {
+		return base
+	}
+	return firstCloudPathPart(relative)
+}
+
+// TV cloud paths are displayed at the work-folder level. Episode files and
+// Season directories are implementation details of the receive/copy tree and
+// make the transfer pipeline unnecessarily noisy.
+func cloudTVFolder(value string) string {
+	parts := strings.Split(strings.Trim(strings.ReplaceAll(value, "\\", "/"), "/"), "/")
+	if len(parts) > 3 {
+		parts = parts[:3]
+	}
+	return strings.Join(parts, "/")
 }
 
 func cloudStageName(ctx context.Context, provider pan115.Provider, inboxCID, stageCID string) string {
