@@ -303,6 +303,15 @@ body {
 .board-shell .upload-callout p, .board-shell .upload-stats span, .board-shell .upload-stats small { font-size: 13px; }
 .board-shell .upload-callout h2 { font-size: 22px; }
 .board-shell .upload-stats strong { font-size: 20px; }
+.queue-status-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.queue-status-actions .queue-retry-button { flex: 0 0 auto; white-space: nowrap; }
+@media (max-width: 780px) {
+  .queue-status-actions { justify-content: flex-start; }
+}
+@media (max-width: 480px) {
+  .queue-status-actions { grid-column: 3; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; }
+  .queue-progress { grid-row: 3; }
+}
 .board-shell .upload-line strong { font-size: 14px; }
 .board-shell .upload-line small { font-size: 13px; }
 .board-shell .directory-switcher button { min-height: 42px; font-size: 14px; }
