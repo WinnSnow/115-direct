@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/local/115-direct/internal/pan115"
 	"github.com/local/115-direct/internal/store"
@@ -697,14 +698,7 @@ func (s *Service) resolve(ctx context.Context, job *store.TransferJob, files []s
 	job.Status = "matching"
 	_ = s.Store.UpdateJob(ctx, job)
 	s.Store.Audit(ctx, "recognition", "开始识别任务 "+job.ID+" · "+job.Title)
-	largest := ""
-	var size int64
-	for _, file := range files {
-		if classify(file.Entry.Name) == Video && file.Entry.Size > size {
-			largest, size = file.Entry.Name, file.Entry.Size
-		}
-	}
-	hint := tmdb.ExtractHint(first(job.Title, largest), largest)
+	hint := recognitionHint(job.Title, files)
 	if job.TMDBKind != "" {
 		hint.Kind = job.TMDBKind
 	}
@@ -738,9 +732,28 @@ func (s *Service) resolve(ctx context.Context, job *store.TransferJob, files []s
 		return nil, err
 	}
 	candidates = tmdb.Rank(hint, candidates)
+	match, ok := tmdb.AutoMatch(candidates)
+	if !ok {
+		// If an unknown Chinese release suffix survived the structural parser,
+		// retry with the stable localized prefix. This is a bounded fallback,
+		// not a growing keyword dictionary; the full query is always attempted
+		// first and the UI still requires confirmation when confidence is low.
+		for _, fallback := range recognitionFallbackHints(hint) {
+			alternative, searchErr := s.TMDB.Search(ctx, fallback.Title)
+			if searchErr != nil {
+				continue
+			}
+			alternative = tmdb.Rank(fallback, alternative)
+			if candidate, matched := tmdb.AutoMatch(alternative); matched {
+				hint = fallback
+				candidates, match, ok = alternative, candidate, true
+				_ = s.Store.PutSetting(ctx, "recognition-hint:"+job.ID, hint)
+				break
+			}
+		}
+	}
 	raw, _ := json.Marshal(candidates)
 	job.Candidates = raw
-	match, ok := tmdb.AutoMatch(candidates)
 	if !ok {
 		job.Status = "waiting_match"
 		job.Error = "TMDB 匹配置信度不足，需要手工指定"
@@ -754,6 +767,106 @@ func (s *Service) resolve(ctx context.Context, job *store.TransferJob, files []s
 	_ = s.Store.PutCached(ctx, matchCacheKey(hint), "match", hint.Title, raw)
 	s.Store.Audit(ctx, "recognition", fmt.Sprintf("识别成功 %s → %s/%d；评分 %.1f；依据 %s；任务 %s", hint.Title, match.Kind, match.ID, match.Score, strings.Join(match.Reasons, "；"), job.ID))
 	return s.TMDB.Details(ctx, match.Kind, match.ID)
+}
+
+func recognitionFallbackHints(h tmdb.Hint) []tmdb.Hint {
+	if h.Title == "" || !hasHan(h.Title) {
+		return nil
+	}
+	fields := strings.Fields(h.Cleaned)
+	if len(fields) < 2 {
+		return nil
+	}
+	// The first localized token is the stable fallback for names such as
+	// "交锋 发布商 2026". Keep the primary full title query ahead of it so
+	// legitimate multi-token titles retain their normal matching behavior.
+	prefix := strings.TrimSpace(fields[0])
+	if prefix == "" || prefix == h.Title {
+		return nil
+	}
+	return []tmdb.Hint{{Title: prefix, Year: h.Year, Kind: h.Kind, TMDBID: h.TMDBID, Original: h.Original, Cleaned: prefix}}
+}
+
+func hasHan(value string) bool {
+	for _, r := range value {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// recognitionHint gives the innermost video names priority because receive
+// folder names often contain uploader, edition, or advertising labels. The
+// wrapper folder is retained as a second source for localized titles and
+// explicit TMDB IDs, which is needed for files such as HeXi.Corridor.*.
+func recognitionHint(folder string, files []sourceFile) tmdb.Hint {
+	folderHint := tmdb.ExtractHint(folder)
+	best := folderHint
+	bestScore := hintSignal(folderHint, false)
+	for _, file := range files {
+		if classify(file.Entry.Name) != Video {
+			continue
+		}
+		candidate := tmdb.ExtractHint(file.Entry.Name)
+		if candidate.Title == "" {
+			continue
+		}
+		candidate = mergeRecognitionHints(candidate, folderHint)
+		score := hintSignal(candidate, true)
+		if score > bestScore {
+			best, bestScore = candidate, score
+		}
+	}
+	if best.Title == "" {
+		best = folderHint
+	}
+	return best
+}
+
+func mergeRecognitionHints(file, folder tmdb.Hint) tmdb.Hint {
+	if file.Year == 0 {
+		file.Year = folder.Year
+	}
+	if file.Kind == "" {
+		file.Kind = folder.Kind
+	}
+	if file.TMDBID == 0 {
+		file.TMDBID = folder.TMDBID
+	}
+	if file.Title == "" {
+		file.Title = folder.Title
+	}
+	if file.Cleaned == "" {
+		file.Cleaned = folder.Cleaned
+	}
+	return file
+}
+
+func hintSignal(h tmdb.Hint, fromFile bool) int {
+	if h.Title == "" {
+		return 0
+	}
+	score := 10
+	if fromFile {
+		score += 4
+	}
+	if h.Year > 0 {
+		score += 2
+	}
+	if h.Kind != "" {
+		score += 2
+	}
+	if h.TMDBID > 0 {
+		score += 4
+	}
+	for _, r := range h.Title {
+		if unicode.Is(unicode.Han, r) {
+			score += 6
+			break
+		}
+	}
+	return score
 }
 
 func matchCacheKey(h tmdb.Hint) string {

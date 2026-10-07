@@ -141,6 +141,44 @@ func TestDetailsByIDFallsBackToTV(t *testing.T) {
 	}
 }
 
+func TestRecognitionHintUsesInnerVideoNamesBeforeReceiveFolder(t *testing.T) {
+	tests := []struct {
+		folder string
+		file   string
+		title  string
+		year   int
+		kind   string
+	}{
+		{
+			folder: "交锋[全40集][臻彩MAXPLUS]",
+			file:   "交锋.The.Long.Watch.2026.S01E38.2160p.WEB-DL.60fps.H.265.AV3A5.1.4.mp4",
+			title:  "交锋", year: 2026, kind: "tv",
+		},
+		{
+			folder: "河西走廊[高码版][全10集][国语配音+中文字幕].HeXi.Corridor.S01.2015.2160p.HQ.WEB-DL.H265.AAC-BlackTV",
+			file:   "HeXi.Corridor.S01E01.2015.2160p.HQ.WEB-DL.H265.AAC-BlackTV.strm",
+			title:  "河西走廊", year: 2015, kind: "tv",
+		},
+	}
+	for _, test := range tests {
+		hint := recognitionHint(test.folder, []sourceFile{{Entry: pan115.Entry{Name: test.file, Size: 100}}})
+		if hint.Title != test.title || hint.Year != test.year || hint.Kind != test.kind {
+			t.Fatalf("%q/%q: got %#v", test.folder, test.file, hint)
+		}
+	}
+}
+
+func TestRecognitionFallbackUsesStableLocalizedPrefix(t *testing.T) {
+	hint := tmdb.Hint{Title: "交锋 发行商", Cleaned: "交锋 发行商", Kind: "tv", Year: 2026}
+	variants := recognitionFallbackHints(hint)
+	if len(variants) != 1 || variants[0].Title != "交锋" || variants[0].Kind != "tv" || variants[0].Year != 2026 {
+		t.Fatalf("unexpected fallback hints: %#v", variants)
+	}
+	if got := recognitionFallbackHints(tmdb.Hint{Title: "The Long Watch", Cleaned: "The Long Watch"}); len(got) != 0 {
+		t.Fatalf("unexpected English fallback hints: %#v", got)
+	}
+}
+
 func TestReconcileLibraryCreatesTaxonomyAndMovesLegacyTitles(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/movie/1087192" {

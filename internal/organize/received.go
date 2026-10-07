@@ -99,14 +99,14 @@ func (s *Service) QueueReceivedMode(ctx context.Context, full bool) (*ReceivedOr
 			}
 			continue
 		}
-		hint := tmdb.ExtractHint(entry.Name)
-		if hint.TMDBID == 0 {
-			result.Skipped++
-			continue
-		}
 		files, err := s.walk(ctx, entry.ID, "")
 		if err != nil {
 			return nil, err
+		}
+		hint := recognitionHint(entry.Name, files)
+		if hint.TMDBID == 0 && hint.Title == "" {
+			result.Skipped++
+			continue
 		}
 		videoCount, mappedCount := 0, 0
 		for _, file := range files {
@@ -126,17 +126,23 @@ func (s *Service) QueueReceivedMode(ctx context.Context, full bool) (*ReceivedOr
 			result.NeedsConfirmation++
 			continue
 		}
-		details, err := s.detailsByID(ctx, hint.TMDBID, hint.Kind)
-		if err != nil {
-			result.NeedsConfirmation++
-			continue
+		var details *tmdb.Details
+		if hint.TMDBID > 0 {
+			details, err = s.detailsByID(ctx, hint.TMDBID, hint.Kind)
+			if err != nil {
+				result.NeedsConfirmation++
+				continue
+			}
 		}
 		id, err := randomID(12)
 		if err != nil {
 			return nil, err
 		}
 		raw, _ := json.Marshal(files)
-		job := &store.TransferJob{ID: id, Source: "inbox", Sender: "手动整理接收目录", Status: "queued", StageCID: entry.ID, TMDBKind: details.Kind, TMDBID: details.ID, Title: details.Title, Expected: raw, Actual: raw}
+		job := &store.TransferJob{ID: id, Source: "inbox", Sender: "手动整理接收目录", Status: "queued", StageCID: entry.ID, TMDBKind: hint.Kind, TMDBID: hint.TMDBID, Title: first(hint.Title, entry.Name), Expected: raw, Actual: raw}
+		if details != nil {
+			job.TMDBKind, job.TMDBID, job.Title = details.Kind, details.ID, details.Title
+		}
 		if err := s.Store.CreateJob(ctx, job); err != nil {
 			return nil, err
 		}
