@@ -251,3 +251,21 @@ func TestTemporaryStageNameUsesIncomingRoot(t *testing.T) {
 		t.Fatalf("temporary stage name = %q", got)
 	}
 }
+
+func TestPersistDirectCloudLinksKeepsReceiveBridge(t *testing.T) {
+	ctx := context.Background()
+	st := reconcileStore(t)
+	service := NewService(st, nil, nil, nil, DirectoryConfig{})
+	job := &store.TransferJob{ID: "cloud-direct", Source: "web", StageCID: "receive-stage"}
+	media := []store.MediaEntry{{RemoteID: "target-file", Name: "Series.S01E02.mkv", STRMPath: "/strm/Series/Season 01/Series - S01E02.strm"}}
+	if err := service.persistDirectCloudLinks(ctx, job, &tmdb.Details{Kind: "tv", ID: 123}, media); err != nil {
+		t.Fatal(err)
+	}
+	link, err := st.MediaLink(ctx, "target-file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if link.InboxID != "receive-stage" || link.OutputPath != media[0].STRMPath || link.Kind != "tv" || link.TMDBID != 123 || link.Season != 1 || link.Episode != 2 {
+		t.Fatalf("direct cloud link was not persisted: %+v", link)
+	}
+}

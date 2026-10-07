@@ -47,6 +47,10 @@ func (s *Service) reorganizeRecord(ctx context.Context, id, kindOverride string,
 			return nil, err
 		}
 		remoteID = b.Item.Media.RemoteID
+		parts := strings.SplitN(id, ":", 3)
+		if len(parts) == 3 {
+			taskID = parts[1]
+		}
 	case strings.HasPrefix(id, "media:"):
 		remoteID = strings.TrimPrefix(id, "media:")
 	case strings.HasPrefix(id, "job:"):
@@ -86,6 +90,21 @@ func (s *Service) reorganizeRecord(ctx context.Context, id, kindOverride string,
 		for _, selected := range ids {
 			if selected == remoteID {
 				return nil, fmt.Errorf("该文件已有整理任务等待执行")
+			}
+		}
+	}
+	// Older automatic/manual records could be persisted without InboxID even
+	// though their task still retained StageCID. Repair that durable bridge when
+	// the operator reopens the record so subsequent cloud projection and retries
+	// have a stable receive-directory reference.
+	if l.InboxID == "" && taskID != "" {
+		for _, j := range jobs {
+			if j.ID == taskID && j.StageCID != "" && j.Source != "local" && j.Source != "manual" && j.Source != "scrape" {
+				l.InboxID = j.StageCID
+				if err := s.Store.PutLink(ctx, *l); err != nil {
+					return nil, err
+				}
+				break
 			}
 		}
 	}
@@ -176,6 +195,9 @@ func (s *Service) retryOrganizationStep(ctx context.Context, e *store.Execution)
 	}
 	if l.Deleted != "" || l.Unavailable {
 		return fmt.Errorf("文件已删除或源不可用，请先处理关联")
+	}
+	if b.Item.Link.InboxID == "" {
+		b.Item.Link.InboxID = l.InboxID
 	}
 	if (e.Status == "mapped" || e.Status == "completed") && (l.OutputPath != b.Item.Link.OutputPath || l.VersionGroup != b.Item.Link.VersionGroup) {
 		return fmt.Errorf("关联已变化，请重新预览整理")

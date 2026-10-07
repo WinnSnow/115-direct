@@ -75,20 +75,36 @@ func (s *Server) organizeJobPreview(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	s.addCloudOrganizationPaths(r.Context(), job, items)
+	projection := s.addCloudOrganizationPaths(r.Context(), job, items)
 	message := "确认 TMDB 条目后生成待整理和成品路径"
 	if len(items) > 0 {
 		message = ""
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"job_id":    job.ID,
-		"status":    job.Status,
-		"title":     job.Title,
-		"items":     items,
-		"mode":      mode,
-		"available": len(items) > 0,
-		"message":   message,
+		"job_id":     job.ID,
+		"status":     job.Status,
+		"title":      job.Title,
+		"items":      items,
+		"mode":       mode,
+		"available":  len(items) > 0,
+		"message":    message,
+		"projection": projection,
 	})
+}
+
+// cloudProjection describes the state of the two paths shown by the transfer
+// page. A completed task can have a durable organization record while one of
+// the 115 paths is temporarily unavailable, so the UI must not collapse every
+// empty field into "no organization record".
+type cloudProjection struct {
+	RecordCount  int    `json:"record_count"`
+	SourceCount  int    `json:"source_count"`
+	TargetCount  int    `json:"target_count"`
+	SourceReady  bool   `json:"source_ready"`
+	TargetReady  bool   `json:"target_ready"`
+	SourceReason string `json:"source_reason,omitempty"`
+	TargetReason string `json:"target_reason,omitempty"`
+	Retryable    bool   `json:"retryable"`
 }
 
 // addCloudOrganizationPaths projects the two 115 paths needed by the transfer
@@ -96,13 +112,30 @@ func (s *Server) organizeJobPreview(w http.ResponseWriter, r *http.Request) {
 // page. A copied file receives a new 115 ID, so source lookup uses the stable
 // file name (and the direct ID when the source was not copied) rather than
 // assuming the target ID is also the source ID.
-func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.TransferJob, items []store.OrganizationRecord) {
-	if job == nil || len(items) == 0 || s.Jobs == nil {
-		return
+func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.TransferJob, items []store.OrganizationRecord) cloudProjection {
+	projection := cloudProjection{RecordCount: len(items)}
+	if job == nil {
+		projection.SourceReason = "任务不存在，无法读取 115 源目录"
+		projection.TargetReason = "任务不存在，无法读取 115 媒体库目录"
+		return projection
+	}
+	if len(items) == 0 {
+		projection.SourceReason = "任务已完成，但没有找到对应的 115 组织记录"
+		projection.TargetReason = projection.SourceReason
+		projection.Retryable = job.Status != "failed"
+		return projection
+	}
+	if s.Jobs == nil {
+		projection.SourceReason = "整理服务未初始化，无法读取 115 源目录"
+		projection.TargetReason = "整理服务未初始化，无法读取 115 媒体库目录"
+		projection.Retryable = true
+		return projection
 	}
 	cfg := s.Jobs.Directories(ctx)
-	if cfg.InboxCID == "" && cfg.LibraryCID == "" {
-		return
+	if cfg.InboxCID == "" || cfg.LibraryCID == "" {
+		projection.SourceReason = "115 接收目录或整理目录尚未配置"
+		projection.TargetReason = projection.SourceReason
+		return projection
 	}
 
 	rootNames := map[string]string{}
@@ -144,6 +177,9 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 		if root == "" {
 			root = job.StageCID
 		}
+		if root == "" {
+			root = cfg.InboxCID
+		}
 		if root != "" && root != items[i].RemoteID {
 			groups[root] = append(groups[root], i)
 		}
@@ -151,10 +187,13 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 	sources := map[string]string{}
 	for root, indexes := range groups {
 		if s.Pan == nil {
+			projection.Retryable = true
 			break
 		}
 		wantedNames := map[string]bool{}
 		wantedIDs := map[string]bool{}
+		wantedSHA1 := map[string]bool{}
+		sha1ByRecord := map[string]string{}
 		for _, index := range indexes {
 			if strings.TrimSpace(items[index].Name) != "" {
 				wantedNames[items[index].Name] = true
@@ -162,15 +201,57 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 			if strings.TrimSpace(items[index].RemoteID) != "" {
 				wantedIDs[items[index].RemoteID] = true
 			}
+			if media, err := s.Store.GetMediaByRemoteID(ctx, items[index].RemoteID); err == nil && strings.TrimSpace(media.SHA1) != "" {
+				wantedSHA1[media.SHA1] = true
+				sha1ByRecord[items[index].ID] = media.SHA1
+			}
 		}
-		byID, byName := map[string]string{}, map[string]string{}
-		if err := collectCloudFiles(ctx, s.Pan, root, "", wantedNames, wantedIDs, byID, byName, map[string]bool{}); err != nil {
-			continue
+		byID, byName, bySHA1 := map[string]string{}, map[string]string{}, map[string]string{}
+		// The record normally carries InboxID. Older automatic runs may only
+		// have the task StageCID, and manual records may have neither. In both
+		// cases scan the configured receive root as a final recovery path.
+		roots := []string{}
+		if root != "" {
+			roots = append(roots, root)
+		}
+		if cfg.InboxCID != "" && cfg.InboxCID != root {
+			roots = append(roots, cfg.InboxCID)
+		}
+		for _, candidate := range roots {
+			names := cloneStringSet(wantedNames)
+			ids := cloneStringSet(wantedIDs)
+			sha1s := cloneStringSet(wantedSHA1)
+			idsFound, namesFound, sha1Found := map[string]string{}, map[string]string{}, map[string]string{}
+			if err := collectCloudFiles(ctx, s.Pan, candidate, "", names, ids, sha1s, idsFound, namesFound, sha1Found, map[string]bool{}); err != nil {
+				projection.Retryable = true
+				continue
+			}
+			for key, value := range idsFound {
+				byID[key] = value
+			}
+			for key, value := range namesFound {
+				byName[key] = value
+			}
+			for key, value := range sha1Found {
+				bySHA1[key] = value
+			}
+			matched := 0
+			for _, index := range indexes {
+				if byID[items[index].RemoteID] != "" || byName[items[index].Name] != "" || bySHA1[sha1ByRecord[items[index].ID]] != "" {
+					matched++
+				}
+			}
+			if matched == len(indexes) {
+				break
+			}
 		}
 		for _, index := range indexes {
 			relative := byID[items[index].RemoteID]
 			if relative == "" {
 				relative = byName[items[index].Name]
+			}
+			if relative == "" {
+				relative = bySHA1[sha1ByRecord[items[index].ID]]
 			}
 			if relative != "" {
 				sources[items[index].ID] = relative
@@ -201,11 +282,19 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 				parts = append(parts, firstCloudPathPart(relative))
 			} else if itemStageName != "" {
 				parts = append(parts, itemStageName)
+				parts = append(parts, relative)
 			} else {
-				parts = append(parts, relative)
-			}
-			if kind != "tv" && itemStageName != "" {
-				parts = append(parts, relative)
+				// Legacy/manual records may have no InboxID. When the fallback
+				// scan starts at the configured receive root, the first relative
+				// component is the receive work folder.
+				first := firstCloudPathPart(relative)
+				rest := strings.TrimPrefix(relative, first)
+				rest = strings.TrimPrefix(rest, "/")
+				if rest != "" {
+					parts = append(parts, first, rest)
+				} else {
+					parts = append(parts, relative)
+				}
 			}
 			item.CloudSourcePath = cloudJoin(parts...)
 		}
@@ -224,7 +313,32 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 		if item.CloudSourcePath != "" || item.CloudTargetPath != "" {
 			item.CloudOperation = cloudOperation(job.Source)
 		}
+		if item.CloudSourcePath != "" {
+			projection.SourceCount++
+		}
+		if item.CloudTargetPath != "" {
+			projection.TargetCount++
+		}
 	}
+	projection.SourceReady = projection.SourceCount == projection.RecordCount
+	projection.TargetReady = projection.TargetCount == projection.RecordCount
+	if !projection.SourceReady {
+		projection.SourceReason = "已找到整理记录，但未在 115 接收目录中找到对应源文件；可能是接收目录已清理、移动或文件名发生变化"
+		projection.Retryable = true
+	}
+	if !projection.TargetReady {
+		projection.TargetReason = "已找到整理记录，但没有得到 115 媒体库目标路径"
+		projection.Retryable = true
+	}
+	return projection
+}
+
+func cloneStringSet(values map[string]bool) map[string]bool {
+	clone := make(map[string]bool, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
 }
 
 func firstCloudPathPart(value string) string {
@@ -298,8 +412,8 @@ func cloudJoin(parts ...string) string {
 	return path.Join(clean...)
 }
 
-func collectCloudFiles(ctx context.Context, provider pan115.Provider, cid, prefix string, wantedNames, wantedIDs map[string]bool, byID, byName map[string]string, seen map[string]bool) error {
-	if cid == "" || (len(wantedNames) == 0 && len(wantedIDs) == 0) || seen[cid] {
+func collectCloudFiles(ctx context.Context, provider pan115.Provider, cid, prefix string, wantedNames, wantedIDs, wantedSHA1 map[string]bool, byID, byName, bySHA1 map[string]string, seen map[string]bool) error {
+	if cid == "" || (len(wantedNames) == 0 && len(wantedIDs) == 0 && len(wantedSHA1) == 0) || seen[cid] {
 		return nil
 	}
 	seen[cid] = true
@@ -310,7 +424,7 @@ func collectCloudFiles(ctx context.Context, provider pan115.Provider, cid, prefi
 	for _, entry := range entries {
 		relative := cloudJoin(prefix, entry.Name)
 		if entry.Directory {
-			if err := collectCloudFiles(ctx, provider, entry.ID, relative, wantedNames, wantedIDs, byID, byName, seen); err != nil {
+			if err := collectCloudFiles(ctx, provider, entry.ID, relative, wantedNames, wantedIDs, wantedSHA1, byID, byName, bySHA1, seen); err != nil {
 				return err
 			}
 			continue
@@ -325,7 +439,11 @@ func collectCloudFiles(ctx context.Context, provider pan115.Provider, cid, prefi
 			byName[entry.Name] = relative
 			delete(wantedNames, entry.Name)
 		}
-		if len(wantedNames) == 0 && len(wantedIDs) == 0 {
+		if entry.SHA1 != "" && wantedSHA1[entry.SHA1] {
+			bySHA1[entry.SHA1] = relative
+			delete(wantedSHA1, entry.SHA1)
+		}
+		if len(wantedNames) == 0 && len(wantedIDs) == 0 && len(wantedSHA1) == 0 {
 			return nil
 		}
 	}

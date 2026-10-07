@@ -104,14 +104,20 @@ func TestOrganizationJobPreviewProjectsPathsModeVersionAndQuality(t *testing.T) 
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 	var value struct {
-		Items []store.OrganizationRecord `json:"items"`
-		Mode  string                     `json:"mode"`
+		Items      []store.OrganizationRecord `json:"items"`
+		Mode       string                     `json:"mode"`
+		Projection cloudProjection            `json:"projection"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &value); err != nil {
 		t.Fatal(err)
 	}
 	if len(value.Items) != 1 || value.Mode != "hardlink" || value.Items[0].SourcePath != "/mnt/pending/source.strm" || value.Items[0].Quality.Resolution != 2160 {
 		t.Fatalf("unexpected preview: %s", w.Body.String())
+	}
+	if value.Projection.RecordCount != 1 || value.Projection.SourceReady || value.Projection.TargetReady || value.Projection.SourceReason == "" {
+		// This fixture intentionally has no 115 configuration. The response
+		// should explain the missing projection separately from the durable record.
+		t.Fatalf("unexpected projection metadata: %+v", value.Projection)
 	}
 }
 
@@ -168,13 +174,17 @@ func TestOrganizationJobPreviewProjects115CloudPaths(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 	var value struct {
-		Items []store.OrganizationRecord `json:"items"`
+		Items      []store.OrganizationRecord `json:"items"`
+		Projection cloudProjection            `json:"projection"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &value); err != nil {
 		t.Fatal(err)
 	}
 	if len(value.Items) != 1 {
 		t.Fatalf("unexpected items: %s", w.Body.String())
+	}
+	if value.Projection.RecordCount != 1 || !value.Projection.SourceReady || !value.Projection.TargetReady {
+		t.Fatalf("unexpected cloud projection metadata: %+v", value.Projection)
 	}
 	item := value.Items[0]
 	if item.CloudSourcePath != "转存文件夹/功夫女足 (2026)/功夫女足.2160p.mkv" || item.CloudTargetPath != "媒体库/电影/华语电影/功夫女足 (2026)/功夫女足.2160p.mkv" || item.CloudOperation != "copy" {
@@ -189,12 +199,15 @@ func TestOrganizationJobPreviewProjects115PathsForManualJob(t *testing.T) {
 		"inbox": {{ID: "stage", Name: "功夫女足 (2026)", Directory: true}},
 		"stage": {{ID: "source", Name: "功夫女足.2160p.mkv", Size: 1024, SHA1: "sha"}},
 	}}
+	// Simulate a legacy manual record that was persisted without a task
+	// StageCID or link InboxID. The projection must recover through the
+	// configured receive root.
 	job := &store.TransferJob{ID: "manual-cloud", Source: "manual", Status: "completed", Title: "功夫女足"}
 	if err := st.CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	media := store.MediaEntry{ID: "play-cloud", RemoteID: "source", Name: "功夫女足.2160p.mkv", RemotePath: "电影/华语电影/功夫女足 (2026)/功夫女足 - 2160P.strm"}
-	link := store.MediaLink{RemoteID: "source", InboxID: "stage", SourcePath: "/pending/source.strm", OutputPath: "/strm/电影/华语电影/功夫女足 (2026)/功夫女足.strm", Mode: "hardlink", VersionGroup: "movie:1491920:0:0-0:"}
+	link := store.MediaLink{RemoteID: "source", SourcePath: "/pending/source.strm", OutputPath: "/strm/电影/华语电影/功夫女足 (2026)/功夫女足.strm", Mode: "hardlink", VersionGroup: "movie:1491920:0:0-0:"}
 	if err := st.PutMedia(ctx, media); err != nil {
 		t.Fatal(err)
 	}

@@ -471,6 +471,13 @@ func (s *Service) process(ctx context.Context, id string) error {
 			return fail(err)
 		}
 	}
+	// The direct cloud path (used when no local pending directory is
+	// configured) writes STRM files without going through executePlan. Persist
+	// the same durable media link here so completed automatic jobs still have a
+	// StageCID/InboxID bridge for the 115 transfer page.
+	if err := s.persistDirectCloudLinks(ctx, job, details, media); err != nil {
+		return fail(err)
+	}
 	if err := s.writeMetadata(ctx, cfg, details, media); err != nil {
 		return fail(err)
 	}
@@ -482,6 +489,45 @@ func (s *Service) process(ctx context.Context, id string) error {
 		return err
 	}
 	s.notify(job, "整理完成", fmt.Sprintf("%s，已生成并刮削 %d 个本地 STRM；115 接收原件保留", details.Title, len(media)))
+	return nil
+}
+
+func (s *Service) persistDirectCloudLinks(ctx context.Context, job *store.TransferJob, details *tmdb.Details, media []store.MediaEntry) error {
+	if job == nil || details == nil {
+		return nil
+	}
+	for _, entry := range media {
+		link, err := s.Store.MediaLink(ctx, entry.RemoteID)
+		if errors.Is(err, sql.ErrNoRows) {
+			link = &store.MediaLink{RemoteID: entry.RemoteID, IngestedAt: time.Now().UTC()}
+		} else if err != nil {
+			return err
+		}
+		if link.InboxID == "" {
+			link.InboxID = job.StageCID
+		}
+		if link.OutputPath == "" {
+			link.OutputPath = entry.STRMPath
+		}
+		if link.Mode == "" {
+			link.Mode = "copy"
+		}
+		link.Kind = details.Kind
+		link.TMDBID = details.ID
+		if details.Kind == "tv" {
+			if episode, ok := parseEpisode(entry.Name); ok {
+				link.Season = episode.Season
+				link.Episode = episode.Start
+				link.EpisodeEnd = episode.End
+			}
+		}
+		if link.IngestedAt.IsZero() {
+			link.IngestedAt = time.Now().UTC()
+		}
+		if err := s.Store.PutLink(ctx, *link); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

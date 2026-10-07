@@ -4,7 +4,9 @@ import { ArrowDownToLine, ArrowLeft, ArrowRight, Bell, Check, ChevronDown, Chevr
 
 type PrototypeSection = 'dashboard' | 'transfers' | 'records' | 'organize' | 'uploads' | 'policies' | 'cache' | 'files' | 'logs' | 'settings'
 type Job = { id: string; title?: string; source?: string; status: string; created_at?: string; share_url?: string; error?: string; tmdb_kind?: string; stage_cid?: string; [key: string]: unknown }
-type LocalJob = { id: string; title: string; source: string; status: string; createdAt: string; size: string; progress: number; quality: string; path: string; shareUrl: string; shareCode?: string; duplicate?: boolean; submissionMessage?: string; shareUpdate?: boolean; error?: string; kind: string; tmdbId: number; stageCID: string; remoteIDs: string[]; cloudSourcePath: string; cloudTargetPath: string; cloudLoaded: boolean; cloudLoading: boolean }
+type CloudProjection = { recordCount: number; sourceCount: number; targetCount: number; sourceReady: boolean; targetReady: boolean; sourceReason: string; targetReason: string; retryable: boolean }
+type CloudProjectionResponse = { record_count?: number; source_count?: number; target_count?: number; source_ready?: boolean; target_ready?: boolean; source_reason?: string; target_reason?: string; retryable?: boolean }
+type LocalJob = { id: string; title: string; source: string; status: string; createdAt: string; size: string; progress: number; quality: string; path: string; shareUrl: string; shareCode?: string; duplicate?: boolean; submissionMessage?: string; shareUpdate?: boolean; error?: string; kind: string; tmdbId: number; stageCID: string; remoteIDs: string[]; cloudSourcePath: string; cloudTargetPath: string; cloudProjection: CloudProjection; cloudLoaded: boolean; cloudLoading: boolean; cloudAttempts: number; cloudRetryAt: number }
 type FileItem = { name: string; type: 'folder' | 'file'; size: string; updated: string; path?: string }
 type Account = { used: number; total: number; username: string; vip: string; expire: string }
 type LogItem = { time: string; level: string; category: string; message: string; tone: string }
@@ -23,6 +25,11 @@ type ManagedUser = { username: string; role: 'admin' | 'operator' | 'viewer'; en
 type CMSStatus = { enabled?: boolean; resolver_ready?: boolean; legacy_enabled?: boolean; legacy_listen?: string; read_only_active?: boolean; restart_required?: boolean; imported?: number; mode?: string; cookie_configured?: boolean }
 type UploadConfig = { enabled: boolean; local_dir: string; target_cid: string; channel: 'auto' | 'open_oauth' | 'cookie'; scan_interval_seconds: number; stable_seconds: number }
 type UploadSession = { id: string; owner_username?: string; filename: string; safe_filename?: string; total_size: number; received_size: number; sha256?: string; target_cid?: string; channel?: string; final_path?: string; status: string; error?: string; upload_task_id?: string; created_at?: string; updated_at?: string; expires_at?: string }
+
+function emptyCloudProjection(): CloudProjection { return { recordCount: 0, sourceCount: 0, targetCount: 0, sourceReady: false, targetReady: false, sourceReason: '', targetReason: '', retryable: false } }
+function normalizeCloudProjection(value?: CloudProjectionResponse): CloudProjection {
+  return { recordCount: Number(value?.record_count || 0), sourceCount: Number(value?.source_count || 0), targetCount: Number(value?.target_count || 0), sourceReady: value?.source_ready === true, targetReady: value?.target_ready === true, sourceReason: String(value?.source_reason || ''), targetReason: String(value?.target_reason || ''), retryable: value?.retryable === true }
+}
 
 const sections: Array<{ id: PrototypeSection; label: string; group: string; icon: string }> = [
   { id: 'dashboard', label: '运行概览', group: '工作台', icon: 'grid' },
@@ -242,14 +249,14 @@ function uploadResumeEntries(): Array<{ id: string; name: string; size: number; 
 function rememberUploadSession(file: File, id: string) { const entries = uploadResumeEntries().filter(item => item.id !== id); entries.unshift({ id, name: file.name, size: file.size, lastModified: file.lastModified }); window.localStorage.setItem(uploadResumeKey, JSON.stringify(entries.slice(0, 50))) }
 function forgetUploadSession(id: string) { const entries = uploadResumeEntries().filter(item => item.id !== id); window.localStorage.setItem(uploadResumeKey, JSON.stringify(entries)) }
 function remoteIDsFromJob(job: Job) { if (!Array.isArray(job.expected)) return []; return job.expected.flatMap((item: unknown) => { if (typeof item === 'string' && ['local', 'manual'].includes(job.source || '')) return [item]; if (item && typeof item === 'object' && 'id' in item) return [String(item.id)]; return [] }) }
-function localJob(job: Job): LocalJob { const status = job.status || 'queued'; const progress = ['completed', 'cleaned', 'success', 'waiting_match', 'needs_confirmation'].includes(status) ? 100 : status === 'failed' ? 0 : status === 'transferring' ? 50 : 10; return { id: job.id, title: job.title || '等待识别', source: job.source || '网页提交', status, createdAt: job.created_at || new Date().toISOString(), size: '-', progress, quality: job.tmdb_kind === 'tv' ? '电视剧' : job.tmdb_kind === 'movie' ? '电影' : '待识别', path: '', shareUrl: job.share_url || '', shareCode: String(job.share_code || ''), duplicate: job.duplicate === true, submissionMessage: String(job.submission_message || ''), shareUpdate: job.share_update === true, error: job.error, kind: job.tmdb_kind || '', tmdbId: Number(job.tmdb_id || 0), stageCID: String(job.stage_cid || ''), remoteIDs: remoteIDsFromJob(job), cloudSourcePath: '', cloudTargetPath: '', cloudLoaded: false, cloudLoading: false } }
+function localJob(job: Job): LocalJob { const status = job.status || 'queued'; const progress = ['completed', 'cleaned', 'success', 'waiting_match', 'needs_confirmation'].includes(status) ? 100 : status === 'failed' ? 0 : status === 'transferring' ? 50 : 10; return { id: job.id, title: job.title || '等待识别', source: job.source || '网页提交', status, createdAt: job.created_at || new Date().toISOString(), size: '-', progress, quality: job.tmdb_kind === 'tv' ? '电视剧' : job.tmdb_kind === 'movie' ? '电影' : '待识别', path: '', shareUrl: job.share_url || '', shareCode: String(job.share_code || ''), duplicate: job.duplicate === true, submissionMessage: String(job.submission_message || ''), shareUpdate: job.share_update === true, error: job.error, kind: job.tmdb_kind || '', tmdbId: Number(job.tmdb_id || 0), stageCID: String(job.stage_cid || ''), remoteIDs: remoteIDsFromJob(job), cloudSourcePath: '', cloudTargetPath: '', cloudProjection: emptyCloudProjection(), cloudLoaded: false, cloudLoading: false, cloudAttempts: 0, cloudRetryAt: 0 } }
 function recordsFor(job: LocalJob) { const records = organizationRecords.value.filter(item => item.task_id === job.id); if (records.length) return records; return organizationRecords.value.filter(item => !item.task_id && (job.remoteIDs.includes(item.remote_id) || (!!job.stageCID && item.inbox_id === job.stageCID))) }
 function recordFor(job: LocalJob) { return recordsFor(job)[0] }
 function jobForOrganizationRecord(record: OrganizationRecord): LocalJob {
   const linked = state.jobs.find(job => job.id === record.task_id) || state.jobs.find(job => job.remoteIDs.includes(record.remote_id) || (!!job.stageCID && job.stageCID === record.inbox_id))
   if (linked) return linked
   const title = (record.name || '未命名媒体').replace(/\.[^.]+$/, '')
-  return { id: record.task_id || `record-${record.id}`, title, source: 'organization', status: record.status === 'failed' ? 'failed' : record.status === 'skipped' ? 'waiting_match' : 'success', createdAt: record.updated_at || new Date().toISOString(), size: '-', progress: 100, quality: record.kind === 'tv' ? '电视剧' : '电影', path: '', shareUrl: '', kind: record.kind || '', tmdbId: Number(record.tmdb_id || 0), stageCID: String(record.inbox_id || ''), remoteIDs: record.remote_id ? [record.remote_id] : [], cloudSourcePath: record.cloud_source_path || '', cloudTargetPath: record.cloud_target_path || '', cloudLoaded: true, cloudLoading: false }
+  return { id: record.task_id || `record-${record.id}`, title, source: 'organization', status: record.status === 'failed' ? 'failed' : record.status === 'skipped' ? 'waiting_match' : 'success', createdAt: record.updated_at || new Date().toISOString(), size: '-', progress: 100, quality: record.kind === 'tv' ? '电视剧' : '电影', path: '', shareUrl: '', kind: record.kind || '', tmdbId: Number(record.tmdb_id || 0), stageCID: String(record.inbox_id || ''), remoteIDs: record.remote_id ? [record.remote_id] : [], cloudSourcePath: record.cloud_source_path || '', cloudTargetPath: record.cloud_target_path || '', cloudProjection: { ...emptyCloudProjection(), recordCount: 1, sourceCount: record.cloud_source_path ? 1 : 0, targetCount: record.cloud_target_path ? 1 : 0, sourceReady: Boolean(record.cloud_source_path), targetReady: Boolean(record.cloud_target_path) }, cloudLoaded: true, cloudLoading: false, cloudAttempts: 0, cloudRetryAt: 0 }
 }
 function organizationKey(record: OrganizationRecord) {
   const kind = record.kind || ''
@@ -367,6 +374,9 @@ function transferPathFallback(job: LocalJob, side: 'source' | 'target') {
   if (['waiting_match', 'needs_confirmation', 'unrecognized'].includes(job.status)) return '等待 TMDB 匹配后生成 115 路径'
   if (['queued', 'matching', 'received', 'organizing', 'transferring', 'retry'].includes(job.status)) return '任务处理中，路径尚未投影'
   if (job.status === 'failed') return '任务失败，未生成 115 路径'
+  if (job.cloudProjection.recordCount === 0) return '已完成，但没有找到对应的 115 组织记录'
+  const reason = side === 'source' ? job.cloudProjection.sourceReason : job.cloudProjection.targetReason
+  if (reason) return reason
   return `已完成，但后端未返回 115 ${side === 'source' ? '源文件' : '目标'}路径`
 }
 function transferSourcePath(job: LocalJob) { return job.cloudLoading ? '正在读取 115 源文件路径…' : job.cloudSourcePath || transferPathFallback(job, 'source') }
@@ -376,23 +386,55 @@ function transferPathReason(job: LocalJob) {
   if (['queued', 'matching', 'received', 'organizing', 'transferring', 'retry'].includes(job.status)) return '尚未生成：任务仍在接收、识别或整理中，完成后会生成路径投影。'
   if (job.status === 'failed') return `尚未生成：任务处理失败${job.error ? `（${job.error}）` : ''}。`
   if (!state.settings.inboxCID || !state.settings.libraryCID) return '路径未返回：115 接收目录或整理目录尚未配置，无法拼出完整路径。'
-  return '路径未返回：任务已完成，但后端没有生成可投影的 115 组织记录，请检查该任务的组织记录和网盘目录。'
+  if (job.cloudLoading) return '正在读取 115 源文件和媒体库路径…'
+  if (job.cloudProjection.recordCount === 0) return job.cloudProjection.sourceReason || '已完成，但暂未找到对应的 115 组织记录；系统会继续重试读取。'
+  if (job.cloudProjection.sourceReady && job.cloudProjection.targetReady) return '115 源文件和媒体库目标路径已关联。'
+  const source = job.cloudProjection.sourceReason || (job.cloudProjection.sourceReady ? '' : '115 源文件路径尚未投影')
+  const target = job.cloudProjection.targetReason || (job.cloudProjection.targetReady ? '' : '115 媒体库目标路径尚未投影')
+  return [source, target].filter(Boolean).join('；') + (job.cloudProjection.retryable ? '。系统会自动重试。' : '。')
 }
 function isCloudTransferJob(job: LocalJob) { return !['local', 'scrape'].includes(job.source) }
+function cloudProjectionNeedsRetry(job: LocalJob) { return isCloudTransferJob(job) && job.cloudLoaded && (!job.cloudProjection.sourceReady || !job.cloudProjection.targetReady || job.cloudProjection.recordCount === 0) }
 async function loadCloudPaths(job: LocalJob) {
-  if (!isCloudTransferJob(job) || job.cloudLoaded || job.cloudLoading) return
+  if (!isCloudTransferJob(job) || job.cloudLoading) return
+  if (job.cloudLoaded && job.cloudProjection.sourceReady && job.cloudProjection.targetReady) return
+  if (job.cloudLoaded && Date.now() < job.cloudRetryAt) return
   job.cloudLoading = true
   try {
-    const value = await request<{ items?: OrganizationRecord[] }>(`/api/v1/organize/jobs/${encodeURIComponent(job.id)}/preview`)
+    const value = await request<{ items?: OrganizationRecord[]; projection?: CloudProjectionResponse }>(`/api/v1/organize/jobs/${encodeURIComponent(job.id)}/preview`)
     const items = value.items || []
     const source = items.find(entry => entry.cloud_source_path)
     const target = items.find(entry => entry.cloud_target_path)
     job.cloudSourcePath = source?.cloud_source_path || ''
     job.cloudTargetPath = target?.cloud_target_path || ''
-  } catch { /* a queued job may not have a projection yet */ } finally {
-    job.cloudLoading = false
+    job.cloudProjection = normalizeCloudProjection(value.projection)
+    if (!value.projection) {
+      job.cloudProjection = { ...emptyCloudProjection(), recordCount: items.length, sourceCount: items.filter(entry => entry.cloud_source_path).length, targetCount: items.filter(entry => entry.cloud_target_path).length, sourceReady: items.length > 0 && items.every(entry => Boolean(entry.cloud_source_path)), targetReady: items.length > 0 && items.every(entry => Boolean(entry.cloud_target_path)) }
+    }
     job.cloudLoaded = true
+    if (job.cloudProjection.sourceReady && job.cloudProjection.targetReady) {
+      job.cloudRetryAt = 0
+    } else {
+      job.cloudAttempts += 1
+      job.cloudRetryAt = Date.now() + Math.min(30000, 2000 * Math.max(1, job.cloudAttempts))
+    }
+  } catch {
+    job.cloudLoaded = true
+    job.cloudAttempts += 1
+    job.cloudRetryAt = Date.now() + Math.min(30000, 2000 * Math.max(1, job.cloudAttempts))
+    if (!job.cloudProjection.sourceReason) job.cloudProjection.sourceReason = '读取 115 源文件路径失败，稍后自动重试'
+    if (!job.cloudProjection.targetReason) job.cloudProjection.targetReason = '读取 115 媒体库目标路径失败，稍后自动重试'
+    job.cloudProjection.retryable = true
+  } finally {
+    job.cloudLoading = false
   }
+}
+async function reloadCloudPaths(job: LocalJob) {
+  job.cloudLoaded = false
+  job.cloudAttempts = 0
+  job.cloudRetryAt = 0
+  job.cloudProjection = emptyCloudProjection()
+  await loadCloudPaths(job)
 }
 async function toggleExpandedJob(job: LocalJob) {
   if (expandedJob.value === job.id) {
@@ -425,7 +467,10 @@ async function loadJobs() {
       if (old && old.status === job.status && old.createdAt === job.createdAt && old.title === job.title && old.kind === job.kind && old.tmdbId === job.tmdbId) {
         job.cloudSourcePath = old.cloudSourcePath
         job.cloudTargetPath = old.cloudTargetPath
+        job.cloudProjection = old.cloudProjection
         job.cloudLoaded = old.cloudLoaded
+        job.cloudAttempts = old.cloudAttempts
+        job.cloudRetryAt = old.cloudRetryAt
         // The request belongs to the old object. Let the refreshed object
         // start its own request instead of inheriting a stuck loading flag.
         job.cloudLoading = false
@@ -1104,7 +1149,7 @@ onBeforeUnmount(() => { window.clearInterval(refreshTimer); window.clearTimeout(
         <div class="queue-board" :key="queuePulse">
           <template v-for="job in filteredJobs" :key="job.id">
             <article class="queue-row" @click="toggleExpandedJob(job)"><span class="queue-index">{{ String(transferJobs.indexOf(job) + 1).padStart(2, '0') }}</span><div class="queue-poster" :class="{ done: ['completed', 'cleaned', 'success'].includes(job.status) }"><Play v-if="['completed', 'cleaned', 'success'].includes(job.status)" :size="16" fill="currentColor" /><LoaderCircle v-else-if="job.status === 'transferring'" class="spin" :size="16" /><Search v-else :size="16" /></div><div class="queue-title"><strong>{{ job.title }}</strong><small>{{ job.id }} · {{ job.source }} · {{ job.quality }} · 整理时间 {{ formatDate(job.createdAt) }}</small><span v-if="isTransferDuplicate(job)" class="duplicate-note">{{ transferDuplicateReason(job) }}</span></div><div class="queue-progress"><div><span :style="{ width: `${job.progress}%` }"></span></div><small>{{ ['completed', 'cleaned', 'success'].includes(job.status) ? '转存完成' : `${job.progress}% 正在处理` }}</small></div><span :class="['board-status', isTransferDuplicate(job) ? 'warn' : statusTone(job.status)]">{{ isTransferDuplicate(job) ? '重复记录' : statusLabel(job.status) }}</span><ChevronDown :class="{ rotated: expandedJob === job.id }" :size="16" /></article>
-            <div v-if="expandedJob === job.id" class="queue-expanded"><div><span class="board-kicker">115 TRANSFER PIPELINE</span><h3>{{ job.title }}</h3><p v-if="transferEpisodeSummary(job)" class="transfer-episode-summary"><strong>剧集：</strong>{{ transferEpisodeSummary(job) }}</p><p v-if="isTransferDuplicate(job)" class="duplicate-reason"><strong>重复原因：</strong>{{ transferDuplicateReason(job) }}</p></div><div class="pipeline"><span>115 源文件</span><ArrowRight :size="15" /><code>{{ transferSourcePath(job) }}</code><ArrowRight :size="15" /><span>115 媒体库</span><code>{{ transferTargetPath(job) }}</code></div><p class="transfer-path-hint">{{ transferPathReason(job) }}</p><div class="expanded-actions"><button v-if="['waiting_match', 'needs_confirmation', 'unrecognized'].includes(job.status)" class="board-button solid" @click.stop="confirmJob(job)"><Check :size="15" />确认匹配</button><button v-if="['completed', 'cleaned', 'success', 'failed'].includes(job.status)" class="board-button solid" @click.stop="retryJob(job)"><RefreshCw :size="15" />重新整理</button><button class="board-button quiet" @click.stop="openTransferCorrection(job)"><Search :size="15" />纠错匹配</button><button class="board-button quiet" @click.stop="navigate('logs')">查看日志</button></div></div>
+        <div v-if="expandedJob === job.id" class="queue-expanded"><div><span class="board-kicker">115 TRANSFER PIPELINE</span><h3>{{ job.title }}</h3><p v-if="transferEpisodeSummary(job)" class="transfer-episode-summary"><strong>剧集：</strong>{{ transferEpisodeSummary(job) }}</p><p v-if="isTransferDuplicate(job)" class="duplicate-reason"><strong>重复原因：</strong>{{ transferDuplicateReason(job) }}</p></div><div class="pipeline"><span>115 源文件</span><ArrowRight :size="15" /><code>{{ transferSourcePath(job) }}</code><ArrowRight :size="15" /><span>115 媒体库</span><code>{{ transferTargetPath(job) }}</code></div><p class="transfer-path-hint">{{ transferPathReason(job) }}</p><div class="expanded-actions"><button v-if="cloudProjectionNeedsRetry(job)" class="board-button quiet" @click.stop="reloadCloudPaths(job)"><RefreshCw :size="13" />重新读取路径</button><button v-if="['waiting_match', 'needs_confirmation', 'unrecognized'].includes(job.status)" class="board-button solid" @click.stop="confirmJob(job)"><Check :size="15" />确认匹配</button><button v-if="['completed', 'cleaned', 'success', 'failed'].includes(job.status)" class="board-button solid" @click.stop="retryJob(job)"><RefreshCw :size="15" />重新整理</button><button class="board-button quiet" @click.stop="openTransferCorrection(job)"><Search :size="15" />纠错匹配</button><button class="board-button quiet" @click.stop="navigate('logs')">查看日志</button></div></div>
           </template>
           <div v-if="!filteredJobs.length" class="kanban-empty">暂无转存任务</div>
         </div>
