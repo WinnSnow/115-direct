@@ -182,6 +182,60 @@ func TestOrganizationJobPreviewProjects115CloudPaths(t *testing.T) {
 	}
 }
 
+func TestOrganizationJobPreviewProjects115PathsForManualJob(t *testing.T) {
+	st, ctx := newFileTestStore(t), context.Background()
+	pan := &organizationCloudPan{tree: map[string][]pan115.Entry{
+		"0":     {{ID: "inbox", Name: "转存文件夹", Directory: true}, {ID: "library", Name: "媒体库", Directory: true}},
+		"inbox": {{ID: "stage", Name: "功夫女足 (2026)", Directory: true}},
+		"stage": {{ID: "source", Name: "功夫女足.2160p.mkv", Size: 1024, SHA1: "sha"}},
+	}}
+	job := &store.TransferJob{ID: "manual-cloud", Source: "manual", Status: "completed", Title: "功夫女足"}
+	if err := st.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	media := store.MediaEntry{ID: "play-cloud", RemoteID: "source", Name: "功夫女足.2160p.mkv", RemotePath: "电影/华语电影/功夫女足 (2026)/功夫女足 - 2160P.strm"}
+	link := store.MediaLink{RemoteID: "source", InboxID: "stage", SourcePath: "/pending/source.strm", OutputPath: "/strm/电影/华语电影/功夫女足 (2026)/功夫女足.strm", Mode: "hardlink", VersionGroup: "movie:1491920:0:0-0:"}
+	if err := st.PutMedia(ctx, media); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutLink(ctx, link); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"item": map[string]any{"media": media, "link": link}})
+	if err := st.PutExecution(ctx, store.Execution{ID: "organize:manual-cloud:source", Kind: "organize", Status: "completed", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuth("admin", "password", []byte("secret"), time.Hour, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRecorder()
+	if _, err := auth.Login(login, "admin", "password"); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: st, Pan: pan, Auth: auth, Jobs: organize.NewService(st, pan, nil, nil, organize.DirectoryConfig{InboxCID: "inbox", LibraryCID: "library", STRMPath: "/strm"})}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/organize/jobs/manual-cloud/preview", nil)
+	req.AddCookie(login.Result().Cookies()[0])
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var value struct {
+		Items []store.OrganizationRecord `json:"items"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Items) != 1 {
+		t.Fatalf("unexpected items: %s", w.Body.String())
+	}
+	item := value.Items[0]
+	if item.CloudSourcePath != "转存文件夹/功夫女足 (2026)/功夫女足.2160p.mkv" || item.CloudTargetPath != "媒体库/电影/华语电影/功夫女足 (2026)/功夫女足 - 2160P.strm" || item.CloudOperation != "copy" {
+		t.Fatalf("unexpected manual cloud projection: %+v", item)
+	}
+}
+
 func TestOrganizationRetryAcceptsEncodedRecordIDAndQueuesOneFile(t *testing.T) {
 	st, ctx := newFileTestStore(t), context.Background()
 	pending := t.TempDir()

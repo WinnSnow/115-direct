@@ -384,11 +384,11 @@ async function loadCloudPaths(job: LocalJob) {
   job.cloudLoading = true
   try {
     const value = await request<{ items?: OrganizationRecord[] }>(`/api/v1/organize/jobs/${encodeURIComponent(job.id)}/preview`)
-    const item = (value.items || []).find(entry => entry.cloud_source_path || entry.cloud_target_path)
-    if (item) {
-      job.cloudSourcePath = item.cloud_source_path || ''
-      job.cloudTargetPath = item.cloud_target_path || ''
-    }
+    const items = value.items || []
+    const source = items.find(entry => entry.cloud_source_path)
+    const target = items.find(entry => entry.cloud_target_path)
+    job.cloudSourcePath = source?.cloud_source_path || ''
+    job.cloudTargetPath = target?.cloud_target_path || ''
   } catch { /* a queued job may not have a projection yet */ } finally {
     job.cloudLoading = false
     job.cloudLoaded = true
@@ -419,6 +419,10 @@ async function loadJobs() {
     state.stats.jobs = state.jobs.length
     state.stats.pending = state.jobs.filter(job => !['completed', 'cleaned', 'success'].includes(job.status)).length
     state.stats.failed = state.jobs.filter(job => job.status === 'failed').length
+    if (expandedJob.value) {
+      const expanded = state.jobs.find(job => job.id === expandedJob.value)
+      if (expanded && isCloudTransferJob(expanded)) await loadCloudPaths(expanded)
+    }
   })()
   try { await jobsRequest } finally { jobsRequest = null }
 }

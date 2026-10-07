@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -96,7 +97,7 @@ func (s *Server) organizeJobPreview(w http.ResponseWriter, r *http.Request) {
 // file name (and the direct ID when the source was not copied) rather than
 // assuming the target ID is also the source ID.
 func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.TransferJob, items []store.OrganizationRecord) {
-	if job == nil || len(items) == 0 || s.Pan == nil || s.Jobs == nil {
+	if job == nil || len(items) == 0 || s.Jobs == nil {
 		return
 	}
 	cfg := s.Jobs.Directories(ctx)
@@ -105,9 +106,11 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 	}
 
 	rootNames := map[string]string{}
-	if entries, err := s.Pan.List(ctx, "0"); err == nil {
-		for _, entry := range entries {
-			rootNames[entry.ID] = entry.Name
+	if s.Pan != nil {
+		if entries, err := s.Pan.List(ctx, "0"); err == nil {
+			for _, entry := range entries {
+				rootNames[entry.ID] = entry.Name
+			}
 		}
 	}
 	inboxRoot := rootNames[cfg.InboxCID]
@@ -120,7 +123,7 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 	}
 
 	stageName := ""
-	if cfg.InboxCID != "" && job.StageCID != "" {
+	if s.Pan != nil && cfg.InboxCID != "" && job.StageCID != "" {
 		if entries, err := s.Pan.List(ctx, cfg.InboxCID); err == nil {
 			for _, entry := range entries {
 				if entry.ID == job.StageCID {
@@ -131,32 +134,61 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 		}
 	}
 
-	// List all source files only until every displayed item has been matched.
-	wanted := map[string]bool{}
-	for _, item := range items {
-		if strings.TrimSpace(item.Name) != "" {
-			wanted[item.Name] = true
+	// A manual reorganization job has no task-level StageCID. Its durable
+	// organization record still carries the receive directory in InboxID, so
+	// resolve each item from that bridge first and use the job StageCID for
+	// ordinary transfer jobs.
+	groups := map[string][]int{}
+	for i := range items {
+		root := items[i].InboxID
+		if root == "" {
+			root = job.StageCID
+		}
+		if root != "" && root != items[i].RemoteID {
+			groups[root] = append(groups[root], i)
 		}
 	}
 	sources := map[string]string{}
-	if job.StageCID != "" && len(wanted) > 0 {
-		_ = collectCloudFiles(ctx, s.Pan, job.StageCID, "", wanted, sources, map[string]bool{})
+	for root, indexes := range groups {
+		if s.Pan == nil {
+			break
+		}
+		wantedNames := map[string]bool{}
+		wantedIDs := map[string]bool{}
+		for _, index := range indexes {
+			if strings.TrimSpace(items[index].Name) != "" {
+				wantedNames[items[index].Name] = true
+			}
+			if strings.TrimSpace(items[index].RemoteID) != "" {
+				wantedIDs[items[index].RemoteID] = true
+			}
+		}
+		byID, byName := map[string]string{}, map[string]string{}
+		if err := collectCloudFiles(ctx, s.Pan, root, "", wantedNames, wantedIDs, byID, byName, map[string]bool{}); err != nil {
+			continue
+		}
+		for _, index := range indexes {
+			relative := byID[items[index].RemoteID]
+			if relative == "" {
+				relative = byName[items[index].Name]
+			}
+			if relative != "" {
+				sources[items[index].ID] = relative
+			}
+		}
 	}
 
 	for i := range items {
 		item := &items[i]
-		relative := sources[item.Name]
+		relative := sources[item.ID]
 		if relative != "" {
-			// A copied 115 file keeps its source name and relative folder under
-			// the version directory. If the persisted target path does not carry
-			// that suffix, leave the source unresolved instead of displaying a
-			// potentially wrong duplicate-name match.
-			targetRelative := strings.Trim(strings.ReplaceAll(item.CloudTargetPath, "\\", "/"), "/")
-			if targetRelative != "" && !strings.HasSuffix(targetRelative, "/"+strings.Trim(relative, "/")) && targetRelative != strings.Trim(relative, "/") {
-				relative = ""
+			root := item.InboxID
+			if root == "" {
+				root = job.StageCID
 			}
-		}
-		if relative != "" {
+			if s.Pan != nil {
+				stageName = cloudStageName(ctx, s.Pan, cfg.InboxCID, root)
+			}
 			parts := []string{inboxRoot}
 			if stageName != "" {
 				parts = append(parts, stageName)
@@ -164,13 +196,35 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 			parts = append(parts, relative)
 			item.CloudSourcePath = cloudJoin(parts...)
 		}
-		if item.CloudTargetPath != "" {
-			item.CloudTargetPath = cloudJoin(libraryRoot, item.CloudTargetPath)
+		targetRelative := item.CloudTargetPath
+		if targetRelative == "" && item.OutputPath != "" && cfg.STRMPath != "" {
+			if rel, err := filepath.Rel(cfg.STRMPath, item.OutputPath); err == nil && filepath.IsLocal(rel) && rel != "." {
+				targetRelative = filepath.ToSlash(rel)
+			}
+		}
+		if targetRelative != "" {
+			item.CloudTargetPath = cloudJoin(libraryRoot, targetRelative)
 		}
 		if item.CloudSourcePath != "" || item.CloudTargetPath != "" {
 			item.CloudOperation = cloudOperation(job.Source)
 		}
 	}
+}
+
+func cloudStageName(ctx context.Context, provider pan115.Provider, inboxCID, stageCID string) string {
+	if inboxCID == "" || stageCID == "" {
+		return ""
+	}
+	entries, err := provider.List(ctx, inboxCID)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.ID == stageCID && entry.Directory {
+			return entry.Name
+		}
+	}
+	return ""
 }
 
 func cloudOperation(source string) string {
@@ -196,8 +250,8 @@ func cloudJoin(parts ...string) string {
 	return path.Join(clean...)
 }
 
-func collectCloudFiles(ctx context.Context, provider pan115.Provider, cid, prefix string, wanted map[string]bool, byName map[string]string, seen map[string]bool) error {
-	if cid == "" || len(wanted) == 0 || seen[cid] {
+func collectCloudFiles(ctx context.Context, provider pan115.Provider, cid, prefix string, wantedNames, wantedIDs map[string]bool, byID, byName map[string]string, seen map[string]bool) error {
+	if cid == "" || (len(wantedNames) == 0 && len(wantedIDs) == 0) || seen[cid] {
 		return nil
 	}
 	seen[cid] = true
@@ -208,18 +262,22 @@ func collectCloudFiles(ctx context.Context, provider pan115.Provider, cid, prefi
 	for _, entry := range entries {
 		relative := cloudJoin(prefix, entry.Name)
 		if entry.Directory {
-			if err := collectCloudFiles(ctx, provider, entry.ID, relative, wanted, byName, seen); err != nil {
+			if err := collectCloudFiles(ctx, provider, entry.ID, relative, wantedNames, wantedIDs, byID, byName, seen); err != nil {
 				return err
 			}
 			continue
 		}
-		if wanted[entry.Name] {
+		if wantedIDs[entry.ID] {
+			byID[entry.ID] = relative
+			delete(wantedIDs, entry.ID)
+		}
+		if wantedNames[entry.Name] {
 			// A receive tree can contain repeated names. Keep the first path;
 			// the visible target path and file ID still let the operator verify it.
 			byName[entry.Name] = relative
-			delete(wanted, entry.Name)
+			delete(wantedNames, entry.Name)
 		}
-		if len(wanted) == 0 {
+		if len(wantedNames) == 0 && len(wantedIDs) == 0 {
 			return nil
 		}
 	}
