@@ -31,13 +31,19 @@ var (
 	// domain itself; punctuation is normalized after this pass.
 	domainPattern    = regexp.MustCompile(`(?i)(?:https?://|www\.)[^\s\[\]【】()（）{}<>]+|(?:^|[\s._\-\[\]【】()（）{}])[a-z][a-z-]*(?:\.[a-z][a-z0-9-]*)*\.(?:com|net|org|cc|cn|tv|vip|top|me|io)(?:$|[\s\[\]【】()（）{}<>])`)
 	adKeywordPattern = regexp.MustCompile(`(?i)(?:高码|低码|全\s*\d+\s*集|国语|国語|中字|中文字幕|配音|字幕|无水印|完整版|合集|收藏版|发布页|交流群|字幕组|压制组|免费|下载|影视|资源|网站|网盘|发布|官网|网)`)
+	// Complete-series labels are structural metadata rather than title text.
+	// Other release labels are identified by shape in isMetadataGroup and
+	// looksLikeReleaseToken, so a new edition name does not require a code edit.
+	seriesNoisePattern = regexp.MustCompile(`(?i)(?:全\s*\d+\s*集|全集|全剧|完结篇|完结)`)
 )
 
 type Hint struct {
-	Title  string
-	Year   int
-	Kind   string
-	TMDBID int64
+	Title    string `json:"title"`
+	Year     int    `json:"year,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	TMDBID   int64  `json:"tmdb_id,omitempty"`
+	Original string `json:"original,omitempty"`
+	Cleaned  string `json:"cleaned,omitempty"`
 }
 
 func ExtractHint(values ...string) Hint {
@@ -46,7 +52,7 @@ func ExtractHint(values ...string) Hint {
 	if match := yearPattern.FindStringSubmatch(joined); len(match) == 2 {
 		hint.Year, _ = strconv.Atoi(match[1])
 	}
-	if episodePattern.MatchString(joined) || seasonOnlyPattern.MatchString(joined) {
+	if episodePattern.MatchString(joined) || seasonOnlyPattern.MatchString(joined) || seriesNoisePattern.MatchString(joined) {
 		hint.Kind = "tv"
 	}
 	if match := tmdbIDPattern.FindStringSubmatch(joined); len(match) == 2 {
@@ -55,8 +61,10 @@ func ExtractHint(values ...string) Hint {
 	if len(values) == 0 {
 		return hint
 	}
+	hint.Original = strings.TrimSpace(values[0])
 	clean := mediaExtension.ReplaceAllString(values[0], " ")
 	clean = stripFilenameNoise(clean)
+	clean = seriesNoisePattern.ReplaceAllString(clean, " ")
 	clean = trimMetadataSuffix(clean)
 	clean = releaseTokens.ReplaceAllString(clean, " ")
 	clean = audioChannels.ReplaceAllString(clean, " ")
@@ -66,6 +74,8 @@ func ExtractHint(values ...string) Hint {
 	clean = yearPattern.ReplaceAllString(clean, " ")
 	clean = strings.TrimSpace(regexp.MustCompile(`[\[\](){}._-]+`).ReplaceAllString(clean, " "))
 	clean = strings.Join(strings.Fields(clean), " ")
+	clean = stripGenericReleaseSuffix(clean)
+	hint.Cleaned = clean
 	hint.Title = simplifyBilingualTitle(clean)
 	return hint
 }
@@ -76,12 +86,118 @@ func ExtractHint(values ...string) Hint {
 func stripFilenameNoise(value string) string {
 	value = domainPattern.ReplaceAllString(value, " ")
 	value = bracketGroup.ReplaceAllStringFunc(value, func(segment string) string {
-		if adKeywordPattern.MatchString(segment) || releaseTokens.MatchString(segment) {
+		if isMetadataGroup(segment) {
 			return " "
 		}
 		return segment
 	})
 	return value
+}
+
+// isMetadataGroup recognizes release metadata by structure. This is the
+// fallback for previously unseen labels such as mixed Han/uppercase edition
+// names; the cleaner does not need a growing list of vendor keywords.
+func isMetadataGroup(segment string) bool {
+	inner := strings.TrimSpace(strings.Trim(segment, "[]【】()（）{}"))
+	if inner == "" {
+		return true
+	}
+	if adKeywordPattern.MatchString(inner) || seriesNoisePattern.MatchString(inner) || releaseTokens.MatchString(inner) || yearPattern.MatchString(inner) || episodePattern.MatchString(inner) || seasonOnlyPattern.MatchString(inner) || tmdbIDPattern.MatchString(inner) {
+		return true
+	}
+	if strings.ContainsAny(inner, "+=&|") && (containsLatin(inner) || containsDigit(inner)) {
+		return true
+	}
+	if endsWithReleaseMarker(inner) {
+		return true
+	}
+	latin, upper, digits := 0, 0, 0
+	for _, r := range inner {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			latin++
+			upper++
+		case r >= 'a' && r <= 'z':
+			latin++
+		case r >= '0' && r <= '9':
+			digits++
+		}
+	}
+	// Mixed Han/uppercase labels and all-uppercase release labels are common
+	// sources of false TMDB queries. Short title qualifiers such as [一] do not
+	// meet these thresholds and remain part of the title.
+	if latin >= 3 && upper+digits >= 3 && (containsHan(inner) || upper == latin) {
+		return true
+	}
+	return digits >= 2 && (containsHan(inner) || latin >= 2)
+}
+
+func stripGenericReleaseSuffix(value string) string {
+	fields := strings.Fields(value)
+	if len(fields) < 2 || !containsHan(fields[0]) {
+		return value
+	}
+	for i := 1; i < len(fields); i++ {
+		if looksLikeReleaseToken(fields[i]) {
+			start := i
+			// Edition labels are sometimes split by spaces (for example
+			// "臻彩 MAXPLUS"). Remove the short Han prefix together with the
+			// release-shaped token while preserving a real multi-word title.
+			if i > 1 && isShortHanToken(fields[i-1]) {
+				start = i - 1
+			}
+			return strings.Join(fields[:start], " ")
+		}
+	}
+	return value
+}
+
+func isShortHanToken(value string) bool {
+	if containsLatin(value) || containsDigit(value) {
+		return false
+	}
+	runes := []rune(strings.TrimSpace(value))
+	return len(runes) > 0 && len(runes) <= 4 && containsHan(value)
+}
+
+func looksLikeReleaseToken(value string) bool {
+	value = strings.Trim(value, "[]【】()（）{}.,_-+")
+	if value == "" || adKeywordPattern.MatchString(value) || seriesNoisePattern.MatchString(value) || releaseTokens.MatchString(value) || domainPattern.MatchString(value) || endsWithReleaseMarker(value) {
+		return true
+	}
+	latin, upper, digits := 0, 0, 0
+	for _, r := range value {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			latin++
+			upper++
+		case r >= 'a' && r <= 'z':
+			latin++
+		case r >= '0' && r <= '9':
+			digits++
+		}
+	}
+	if strings.ContainsAny(value, "+=&|") {
+		return true
+	}
+	return latin >= 3 && upper+digits >= 3 && (upper >= latin/2 || digits > 0)
+}
+
+func containsDigit(value string) bool {
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func endsWithReleaseMarker(value string) bool {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) < 2 || !containsHan(value) {
+		return false
+	}
+	return strings.ContainsRune("版集季码源组清配字剧", runes[len(runes)-1])
 }
 
 // Many Chinese releases contain both the localized title and a transliterated

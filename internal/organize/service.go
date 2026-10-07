@@ -708,6 +708,7 @@ func (s *Service) resolve(ctx context.Context, job *store.TransferJob, files []s
 	if job.TMDBKind != "" {
 		hint.Kind = job.TMDBKind
 	}
+	s.Store.Audit(ctx, "recognition", fmt.Sprintf("名称清洗：%s → %s", hint.Original, hint.Title))
 	if err := s.Store.PutSetting(ctx, "recognition-hint:"+job.ID, hint); err != nil {
 		return nil, err
 	}

@@ -54,6 +54,18 @@ func TestExtractHintCleansChineseReleaseNoiseAndBilingualAliases(t *testing.T) {
 			name: "河西走廊.S01E01.2015.2160p.HQ.WEB-DL.H265.AAC-BlackTV",
 			want: "河西走廊", kind: "tv", year: 2015,
 		},
+		{
+			name: "交锋[全40集][臻彩MAXPLUS]",
+			want: "交锋", kind: "tv",
+		},
+		{
+			name: "交锋 全40集 臻彩 MAXPLUS.mp4",
+			want: "交锋", kind: "tv",
+		},
+		{
+			name: "交锋[神秘发行版][QMAX999]",
+			want: "交锋", kind: "",
+		},
 	}
 	for _, test := range tests {
 		hint := ExtractHint(test.name)
