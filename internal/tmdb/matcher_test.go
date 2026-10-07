@@ -35,6 +35,52 @@ func TestExtractTVHint(t *testing.T) {
 	}
 }
 
+func TestExtractHintCleansChineseReleaseNoiseAndBilingualAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		kind string
+		year int
+	}{
+		{
+			name: "河西走廊[高码版][全10集][国语配音+中文字幕].HeXi.Corridor.S01.2015.2160p.HQ.WEB-DL.H265.AAC-BlackTV",
+			want: "河西走廊", kind: "tv", year: 2015,
+		},
+		{
+			name: "[某某网] 斗破苍穹.S01E01.1080p.www.example.com.mkv",
+			want: "斗破苍穹", kind: "tv",
+		},
+		{
+			name: "河西走廊.S01E01.2015.2160p.HQ.WEB-DL.H265.AAC-BlackTV",
+			want: "河西走廊", kind: "tv", year: 2015,
+		},
+	}
+	for _, test := range tests {
+		hint := ExtractHint(test.name)
+		if hint.Title != test.want || hint.Kind != test.kind || hint.Year != test.year {
+			t.Errorf("%q: got %#v, want title=%q kind=%q year=%d", test.name, hint, test.want, test.kind, test.year)
+		}
+	}
+}
+
+func TestExtractHintPreservesNumericBilingualTitlesAndNormalDottedTitles(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "流浪地球 2 The Wandering Earth (2023).mkv", want: "流浪地球 2"},
+		{name: "Love.Com.2024.mkv", want: "Love Com"},
+		{name: "The.Matrix.1999.mkv", want: "The Matrix"},
+		{name: "S01E01.1080p.www.example.com.mkv", want: ""},
+	}
+	for _, test := range tests {
+		hint := ExtractHint(test.name)
+		if hint.Title != test.want {
+			t.Errorf("%q: got title %q, want %q", test.name, hint.Title, test.want)
+		}
+	}
+}
+
 func TestExtractHintRemovesCodecVariantsAndExtension(t *testing.T) {
 	for _, name := range []string{
 		"功夫女足 (2026).2160p.HDR10.H.265.AAC 2.0.mp4",
