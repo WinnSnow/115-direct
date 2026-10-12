@@ -329,3 +329,22 @@ func TestChangedShareContentSamePathAndStableOrder(t *testing.T) {
 		t.Fatal("same SHA1 recopy caused by remote ID change")
 	}
 }
+
+func TestChangedShareContentIgnoresRegeneratedOuterFolder(t *testing.T) {
+	old := []pan115.ShareFile{shareEpisode(1), shareEpisode(2)}
+	current := []pan115.ShareFile{old[0], old[1]}
+	current[0].Relative = "Renamed.Show/Season 01/" + current[0].Entry.Name
+	current[1].Relative = "Renamed.Show/Season 01/" + current[1].Entry.Name
+	if shareFingerprint(old) != shareFingerprint(current) {
+		t.Fatal("outer folder rename changed the content fingerprint")
+	}
+	if changed := changedShareFiles(old, current); len(changed) != 0 {
+		t.Fatalf("outer folder rename was treated as new content: %+v", changed)
+	}
+	current = append(current, shareEpisode(3))
+	current[2].Relative = "Renamed.Show/Season 01/" + current[2].Entry.Name
+	changed := changedShareFiles(old, current)
+	if len(changed) != 1 || changed[0].Entry.ID != shareEpisode(3).Entry.ID {
+		t.Fatalf("only the new episode should be selected: %+v", changed)
+	}
+}

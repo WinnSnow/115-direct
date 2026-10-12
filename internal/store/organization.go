@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +53,44 @@ type organizationPlan struct {
 	} `json:"request"`
 }
 
+// duplicateSkipReason identifies a plan item that did not produce a distinct
+// organization result. These entries are useful in the audit log, but showing
+// them as media records makes one episode appear to have been organized many
+// times. A generic/manual skip is retained so operators can still inspect why
+// that item did not complete.
+func duplicateSkipReason(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	return reason == "已完成相同整理" ||
+		strings.Contains(reason, "SHA1 与") ||
+		strings.Contains(reason, "现有版本优先") ||
+		strings.Contains(reason, "同批其他版本优先")
+}
+
+func organizationQualityKey(q Quality) string {
+	return fmt.Sprintf("%d|%s|%s|%s|%s", q.Resolution, q.FPS, q.HDR, q.Codec, q.Audio)
+}
+
+// organizationDedupKey represents one visible media result. The output path
+// is the strongest identity because it is the actual published STRM. When a
+// result has no output yet, use the resolved version and quality fields so
+// distinct versions remain visible while repeated attempts collapse.
+func organizationDedupKey(r OrganizationRecord) string {
+	quality := organizationQualityKey(r.Quality)
+	if r.Kind != "" && (r.TMDBID > 0 || r.VersionGroup != "" || r.Episode > 0) {
+		// Prefer the resolved media identity over the path. A repeated attempt
+		// can receive a different collision-suffixed path while still being the
+		// same TMDB version and quality; it must remain one visible row.
+		return fmt.Sprintf("media:%s:%d:%d:%d:%d:%s:%s", r.Kind, r.TMDBID, r.Season, r.Episode, r.EpisodeEnd, r.VersionGroup, quality)
+	}
+	if r.OutputPath != "" {
+		return "output:" + r.OutputPath
+	}
+	if r.RemoteID != "" {
+		return "remote:" + r.RemoteID
+	}
+	return "record:" + r.ID
+}
+
 func (s *Store) OrganizationJobs(ctx context.Context) ([]TransferJob, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM transfer_jobs ORDER BY updated_at DESC`)
 	if err != nil {
@@ -90,14 +129,27 @@ func (s *Store) OrganizationRecords(ctx context.Context, filter RecordFilter) ([
 	byLink := map[string]MediaLink{}
 	byMedia := map[string]MediaEntry{}
 	byJob := map[string]TransferJob{}
+	publishedSHA1 := map[string]bool{}
 	for _, l := range links {
 		byLink[l.RemoteID] = l
 	}
 	for _, m := range media {
 		byMedia[m.RemoteID] = m
 	}
+	for _, l := range links {
+		if l.OutputPath == "" || l.Deleted != "" {
+			continue
+		}
+		if m := byMedia[l.RemoteID]; m.SHA1 != "" {
+			publishedSHA1[strings.ToUpper(strings.TrimSpace(m.SHA1))] = true
+		}
+	}
 	for _, j := range jobs {
 		byJob[j.ID] = j
+	}
+	searchTerm := strings.ToLower(strings.TrimSpace(f.Search))
+	jobSearch := func(id string) bool {
+		return searchTerm != "" && strings.Contains(strings.ToLower(id), searchTerm)
 	}
 	seen := map[string]bool{}
 	pairs := map[string]bool{}
@@ -215,6 +267,14 @@ func (s *Store) OrganizationRecords(ctx context.Context, filter RecordFilter) ([
 			r := makeRecord("job:"+j.ID+":"+id, j.ID, item, j.UpdatedAt)
 			r.Status = "success"
 			jobStatus(&r, j)
+			// Duplicate/version-policy skips are already represented by the
+			// existing result. Keep generic skips for diagnostics, but do not
+			// render a second media record for content that produced no output.
+			if item.Skip != "" && duplicateSkipReason(item.Skip) && !jobSearch(j.ID) {
+				pairs[j.ID+":"+id] = true
+				seen[id] = true
+				continue
+			}
 			if item.Skip != "" && item.Skip != "已完成相同整理" {
 				r.Status = "skipped"
 				r.Error = item.Skip
@@ -227,6 +287,16 @@ func (s *Store) OrganizationRecords(ctx context.Context, filter RecordFilter) ([
 	for _, l := range links {
 		if seen[l.RemoteID] || l.Deleted != "" {
 			continue
+		}
+		// A duplicate receive can leave a media link without Suppressed when the
+		// existing version already owns the output. If its SHA1 is already
+		// published, it is a source duplicate rather than a new unrecognized
+		// media item and must stay out of the organization history.
+		if l.OutputPath == "" && l.Suppressed == "" {
+			if m := byMedia[l.RemoteID]; m.SHA1 != "" && publishedSHA1[strings.ToUpper(strings.TrimSpace(m.SHA1))] {
+				seen[l.RemoteID] = true
+				continue
+			}
 		}
 		// Older cloud organize runs did not persist an organize plan or
 		// execution step.  The durable link still carries the receive directory
@@ -250,6 +320,10 @@ func (s *Store) OrganizationRecords(ctx context.Context, filter RecordFilter) ([
 			r.Status = "success"
 		}
 		if l.Suppressed != "" {
+			if duplicateSkipReason(l.Suppressed) {
+				seen[l.RemoteID] = true
+				continue
+			}
 			r.Status = "skipped"
 			r.Error = l.Suppressed
 		}
@@ -272,7 +346,6 @@ func (s *Store) OrganizationRecords(ctx context.Context, filter RecordFilter) ([
 	// item, but a task preview still needs a task-scoped projection.  When the
 	// caller searches a specific task, add an alias through the durable
 	// InboxID/StageCID bridge without polluting the global history list.
-	searchTerm := strings.ToLower(strings.TrimSpace(f.Search))
 	if searchTerm != "" {
 		for _, j := range jobs {
 			if !strings.Contains(strings.ToLower(j.ID), searchTerm) || j.StageCID == "" || j.Source == "local" || j.Source == "manual" {
@@ -288,6 +361,10 @@ func (s *Store) OrganizationRecords(ctx context.Context, filter RecordFilter) ([
 					r.Status = "success"
 				}
 				if l.Suppressed != "" {
+					if duplicateSkipReason(l.Suppressed) {
+						pairs[j.ID+":"+l.RemoteID] = true
+						continue
+					}
 					r.Status = "skipped"
 					r.Error = l.Suppressed
 				}
@@ -326,6 +403,21 @@ func (s *Store) OrganizationRecords(ctx context.Context, filter RecordFilter) ([
 		}
 		filtered = append(filtered, r)
 	}
+	// Execution history can contain retries or a legacy projection for the
+	// same published STRM. Keep the newest visible result for each output or
+	// version/quality identity. Different versions and quality paths retain
+	// separate rows.
+	unique := make([]OrganizationRecord, 0, len(filtered))
+	seenResults := map[string]bool{}
+	for _, r := range filtered {
+		key := organizationDedupKey(r)
+		if seenResults[key] {
+			continue
+		}
+		seenResults[key] = true
+		unique = append(unique, r)
+	}
+	filtered = unique
 	total := len(filtered)
 	if f.Offset > total {
 		f.Offset = total

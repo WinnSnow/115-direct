@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -123,11 +124,52 @@ func TestOrganizationJobPreviewProjectsPathsModeVersionAndQuality(t *testing.T) 
 
 type organizationCloudPan struct {
 	pan115.Provider
-	tree map[string][]pan115.Entry
+	tree   map[string][]pan115.Entry
+	errors map[string]error
 }
 
 func (p *organizationCloudPan) List(_ context.Context, cid string) ([]pan115.Entry, error) {
+	if err := p.errors[cid]; err != nil {
+		return nil, err
+	}
 	return p.tree[cid], nil
+}
+
+func TestOrganizationJobPreviewMarksDeletedReceiveDirectory(t *testing.T) {
+	st, ctx := newFileTestStore(t), context.Background()
+	pan := &organizationCloudPan{
+		tree: map[string][]pan115.Entry{
+			"0":       {{ID: "inbox", Name: "接收目录", Directory: true}, {ID: "library", Name: "媒体库", Directory: true}},
+			"inbox":   {{ID: "stage", Name: "沧元图 (2023)", Directory: true}},
+			"library": nil,
+		},
+		errors: map[string]error{"stage": fmt.Errorf("404 directory not found")},
+	}
+	job := &store.TransferJob{ID: "deleted-receive", Source: "web", Status: "completed", StageCID: "stage", Title: "沧元图"}
+	if err := st.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	media := store.MediaEntry{ID: "play-deleted", RemoteID: "source", Name: "沧元图.S01E01.mkv", RemotePath: "电视剧/国漫/沧元图/S01E01.strm"}
+	link := store.MediaLink{RemoteID: "source", InboxID: "stage", SourcePath: "/pending/S01E01.strm", OutputPath: "/strm/电视剧/国漫/沧元图/S01E01.strm", Kind: "tv", TMDBID: 229192, Season: 1, Episode: 1}
+	if err := st.PutMedia(ctx, media); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutLink(ctx, link); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"item": map[string]any{"media": media, "link": link}})
+	if err := st.PutExecution(ctx, store.Execution{ID: "organize:deleted-receive:source", Kind: "organize", Status: "completed", Body: body}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: st, Pan: pan, Jobs: organize.NewService(st, pan, nil, nil, organize.DirectoryConfig{InboxCID: "inbox", LibraryCID: "library", STRMPath: "/strm"})}
+	items, _, err := st.OrganizationRecords(ctx, store.RecordFilter{Search: job.ID, Limit: 100})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("organization records: %d %v", len(items), err)
+	}
+	projection := server.addCloudOrganizationPaths(ctx, job, items)
+	if projection.SourceReady || projection.SourceReason != "接收目录已删除" || projection.Retryable {
+		t.Fatalf("unexpected deleted receive projection: %+v", projection)
+	}
 }
 
 func TestOrganizationJobPreviewProjects115CloudPaths(t *testing.T) {

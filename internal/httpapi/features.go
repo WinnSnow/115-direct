@@ -172,6 +172,10 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 	// resolve each item from that bridge first and use the job StageCID for
 	// ordinary transfer jobs.
 	groups := map[string][]int{}
+	sourceStageMissing := false
+	sourceInboxMissing := false
+	sourceFileMissing := false
+	sourceLookupFailed := false
 	for i := range items {
 		root := items[i].InboxID
 		if root == "" {
@@ -187,6 +191,7 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 	sources := map[string]string{}
 	for root, indexes := range groups {
 		if s.Pan == nil {
+			sourceLookupFailed = true
 			projection.Retryable = true
 			break
 		}
@@ -223,7 +228,16 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 			sha1s := cloneStringSet(wantedSHA1)
 			idsFound, namesFound, sha1Found := map[string]string{}, map[string]string{}, map[string]string{}
 			if err := collectCloudFiles(ctx, s.Pan, candidate, "", names, ids, sha1s, idsFound, namesFound, sha1Found, map[string]bool{}); err != nil {
-				projection.Retryable = true
+				if isCloudMissingError(err) {
+					if candidate == cfg.InboxCID {
+						sourceInboxMissing = true
+					} else {
+						sourceStageMissing = true
+					}
+				} else {
+					sourceLookupFailed = true
+					projection.Retryable = true
+				}
 				continue
 			}
 			for key, value := range idsFound {
@@ -244,6 +258,7 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 			if matched == len(indexes) {
 				break
 			}
+			sourceFileMissing = true
 		}
 		for _, index := range indexes {
 			relative := byID[items[index].RemoteID]
@@ -323,8 +338,18 @@ func (s *Server) addCloudOrganizationPaths(ctx context.Context, job *store.Trans
 	projection.SourceReady = projection.SourceCount == projection.RecordCount
 	projection.TargetReady = projection.TargetCount == projection.RecordCount
 	if !projection.SourceReady {
-		projection.SourceReason = "已找到整理记录，但未在 115 接收目录中找到对应源文件；可能是接收目录已清理、移动或文件名发生变化"
-		projection.Retryable = true
+		switch {
+		case sourceLookupFailed:
+			projection.SourceReason = "读取 115 接收目录失败，可点击“重新读取路径”重试"
+			projection.Retryable = true
+		case sourceStageMissing || sourceInboxMissing:
+			projection.SourceReason = "接收目录已删除"
+		case sourceFileMissing:
+			projection.SourceReason = "接收目录文件已清理"
+		default:
+			projection.SourceReason = "已找到整理记录，但未在 115 接收目录中找到对应源文件；可能是文件名发生变化"
+			projection.Retryable = true
+		}
 	}
 	if !projection.TargetReady {
 		projection.TargetReason = "已找到整理记录，但没有得到 115 媒体库目标路径"
@@ -396,6 +421,25 @@ func cloudOperation(source string) string {
 	default:
 		return "copy"
 	}
+}
+
+// isCloudMissingError identifies errors returned by the 115 APIs when a
+// configured receive directory or its temporary task folder no longer exists.
+// Other failures (authentication, timeout, rate limiting) remain retryable.
+func isCloudMissingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"not found", "not_found", "does not exist", "no such file", "no such directory",
+		"404", "不存在", "找不到", "已删除", "被删除",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func cloudJoin(parts ...string) string {

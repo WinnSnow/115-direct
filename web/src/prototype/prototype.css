@@ -268,6 +268,9 @@ body {
 .board-shell .board-kicker { font-size: 12px; }
 .board-shell .board-topline h1 { font-size: 32px; }
 .board-shell .board-top-actions .board-online { font-size: 12px; }
+.board-top-actions .board-online { padding: 0; border: 0; background: transparent; cursor: pointer; }
+.board-online.connection-error i { background: #e6757e; box-shadow: 0 0 0 4px rgba(230,117,126,.12); }
+.board-online.connection-unknown i { background: #899bb1; box-shadow: 0 0 0 4px rgba(137,155,177,.12); }
 .board-shell .board-button { min-height: 42px; padding-inline: 16px; font-size: 14px; }
 .board-shell .board-button.tiny { min-height: 32px; padding-inline: 10px; font-size: 12px; }
 .board-shell .board-search, .board-shell .board-search input, .board-shell .queue-toolbar { font-size: 14px; }

@@ -32,16 +32,41 @@ type shareCheck struct {
 
 func shareFingerprint(files []pan115.ShareFile) string {
 	type identity struct {
-		Path, ID, SHA1 string
-		Size           int64
+		Identity string
+		Size     int64
 	}
 	rows := make([]identity, 0, len(files))
 	for _, f := range files {
-		rows = append(rows, identity{f.Relative, f.Entry.ID, strings.ToUpper(f.Entry.SHA1), f.Entry.Size})
+		rows = append(rows, identity{shareFileIdentity(f), f.Entry.Size})
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].Path < rows[j].Path })
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Identity < rows[j].Identity })
 	raw, _ := json.Marshal(rows)
 	return store.ContentHash(raw)
+}
+
+// shareFileIdentity intentionally ignores parent directories. Share providers
+// commonly regenerate a share with a new outer folder name while retaining
+// the same video files. Content hashes are preferred; when a provider omits
+// SHA1, a normalized basename plus size is the stable local identity.
+func shareFileIdentity(f pan115.ShareFile) string {
+	name := normalizeShareFilename(path.Base(f.Relative))
+	sha := strings.ToUpper(strings.TrimSpace(f.Entry.SHA1))
+	if sha != "" {
+		return fmt.Sprintf("sha1:%s:%d", sha, f.Entry.Size)
+	}
+	if name != "" {
+		return fmt.Sprintf("name:%s:%d", name, f.Entry.Size)
+	}
+	if f.Entry.ID != "" {
+		return "id:" + f.Entry.ID
+	}
+	return fmt.Sprintf("size:%d", f.Entry.Size)
+}
+
+func normalizeShareFilename(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.Join(strings.Fields(name), " ")
+	return name
 }
 
 func verifyReceivedManifest(expected []pan115.ShareFile, actual []sourceFile) error {
@@ -62,32 +87,39 @@ func verifyReceivedManifest(expected []pan115.ShareFile, actual []sourceFile) er
 }
 
 func changedShareFiles(old, current []pan115.ShareFile) []pan115.ShareFile {
-	before := map[string]pan115.Entry{}
-	for _, f := range old {
-		before[f.Relative] = f.Entry
-	}
+	matched := make([]bool, len(old))
 	out := []pan115.ShareFile{}
 	for _, f := range current {
-		v, ok := before[f.Relative]
-		same := ok && v.Size == f.Entry.Size
-		if same && v.SHA1 != "" && f.Entry.SHA1 != "" {
-			same = strings.EqualFold(v.SHA1, f.Entry.SHA1)
-		} else if same {
-			same = v.ID != "" && v.ID == f.Entry.ID
+		found := -1
+		for i := range old {
+			if !matched[i] && sameShareFile(old[i], f) {
+				found = i
+				break
+			}
 		}
-		if !same {
+		if found < 0 {
 			out = append(out, f)
+		} else {
+			matched[found] = true
 		}
 	}
 	return out
 }
 
 func sameShareFile(old, current pan115.ShareFile) bool {
-	if old.Relative != current.Relative || old.Entry.Size != current.Entry.Size {
+	if old.Entry.Size != current.Entry.Size {
 		return false
 	}
 	if old.Entry.SHA1 != "" && current.Entry.SHA1 != "" {
 		return strings.EqualFold(old.Entry.SHA1, current.Entry.SHA1)
+	}
+	// A provider may add/remove SHA1 metadata between snapshots. Matching the
+	// normalized basename and size keeps that transition from re-receiving an
+	// unchanged file, while differing hashes above still detect real changes.
+	oldName := normalizeShareFilename(path.Base(old.Relative))
+	currentName := normalizeShareFilename(path.Base(current.Relative))
+	if oldName != "" && oldName == currentName {
+		return true
 	}
 	return old.Entry.ID != "" && old.Entry.ID == current.Entry.ID
 }
@@ -117,21 +149,23 @@ func (s *Service) findShareBaseline(ctx context.Context, kind string, tmdbID int
 		if err := s.Store.GetSetting(ctx, "share_selection:"+job.ID, &baseline); err != nil || len(baseline.Snapshot.Files) == 0 {
 			continue
 		}
-		currentByPath := map[string]pan115.ShareFile{}
-		for _, file := range current {
-			currentByPath[file.Relative] = file
-		}
 		unchanged := 0
+		matched := make([]bool, len(current))
 		allHistoricalPresent := true
 		for _, old := range baseline.Snapshot.Files {
-			file, ok := currentByPath[old.Relative]
-			if !ok {
+			found := -1
+			for i, file := range current {
+				if !matched[i] && sameShareFile(old, file) {
+					found = i
+					break
+				}
+			}
+			if found < 0 {
 				allHistoricalPresent = false
 				break
 			}
-			if sameShareFile(old, file) {
-				unchanged++
-			}
+			matched[found] = true
+			unchanged++
 		}
 		if !allHistoricalPresent || unchanged == 0 || len(current) < len(baseline.Snapshot.Files) {
 			continue

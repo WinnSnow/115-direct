@@ -32,6 +32,47 @@ func TestOrganizationRecordsHistoryPaginationAndSecretProjection(t *testing.T) {
 	}
 }
 
+func TestOrganizationRecordsCollapsesRepeatedAttemptsButKeepsVersions(t *testing.T) {
+	st, ctx := testStore(t), context.Background()
+	put := func(id, output, version string) {
+		raw, _ := json.Marshal(map[string]any{"item": organizationItem{
+			Media: MediaEntry{ID: "play-" + id, RemoteID: id, Name: "Show.S01E98.mkv"},
+			Link:  MediaLink{RemoteID: id, OutputPath: output, VersionGroup: version, Kind: "tv", TMDBID: 1, Season: 1, Episode: 98, EpisodeEnd: 98, Quality: Quality{Resolution: 1080}},
+		}})
+		if err := st.PutExecution(ctx, Execution{ID: "organize:job-" + id + ":" + id, Kind: "organize", Status: "completed", Body: raw}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("retry-1", "/library/Show/S01E98-1080.strm", "tv:1:1:98-98:1080")
+	put("retry-2", "/library/Show/S01E98-1080-duplicate.strm", "tv:1:1:98-98:1080")
+	put("quality-4k", "/library/Show/S01E98-2160.strm", "tv:1:1:98-98:2160")
+	rows, total, err := st.OrganizationRecords(ctx, RecordFilter{Limit: 100})
+	if err != nil || total != 2 || len(rows) != 2 {
+		t.Fatalf("repeated attempts were not collapsed while versions were retained: rows=%+v total=%d err=%v", rows, total, err)
+	}
+}
+
+func TestOrganizationRecordsHidesUnpublishedSHA1Duplicate(t *testing.T) {
+	st, ctx := testStore(t), context.Background()
+	existing := MediaEntry{ID: "play-existing", RemoteID: "existing", Name: "Show.S01E98.mkv", SHA1: "same-content", STRMPath: "/pending/existing.strm"}
+	duplicate := MediaEntry{ID: "play-duplicate", RemoteID: "duplicate", Name: "Show.S01E98.mkv", SHA1: "SAME-CONTENT", STRMPath: "/pending/duplicate.strm"}
+	for _, m := range []MediaEntry{existing, duplicate} {
+		if err := st.PutMedia(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.PutLink(ctx, MediaLink{RemoteID: existing.RemoteID, OutputPath: "/library/Show/S01E98.strm", VersionGroup: "tv:1:1:98-98:", Kind: "tv", TMDBID: 1, Season: 1, Episode: 98}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutLink(ctx, MediaLink{RemoteID: duplicate.RemoteID, SourcePath: duplicate.STRMPath, Kind: "tv", TMDBID: 1, Season: 1, Episode: 98}); err != nil {
+		t.Fatal(err)
+	}
+	rows, total, err := st.OrganizationRecords(ctx, RecordFilter{Limit: 100})
+	if err != nil || total != 1 || len(rows) != 1 || rows[0].RemoteID != existing.RemoteID {
+		t.Fatalf("unpublished duplicate leaked into organization records: rows=%+v total=%d err=%v", rows, total, err)
+	}
+}
+
 func TestOrganizationRecordsUnrecognizedFailuresAndSkippedFiles(t *testing.T) {
 	st, ctx := testStore(t), context.Background()
 	for _, status := range []string{"waiting_match", "failed", "queued", "completed"} {
