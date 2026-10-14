@@ -24,7 +24,7 @@ func metadataClient(t *testing.T) *tmdb.Client {
 		case "/tv/229192":
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": 229192, "name": "The Demon Hunter", "first_air_date": "2023-06-22", "runtime": 45, "original_language": "zh", "genres": []map[string]any{{"id": 16, "name": "Animation"}}})
 		case "/tv/229192/season/1":
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "season_number": 1, "name": "Season 1", "episodes": []map[string]any{{"id": 2, "episode_number": 2, "name": "Episode Two", "overview": "Second & plot", "air_date": "2023-06-23", "runtime": 42}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "season_number": 1, "name": "Season 1", "episodes": []map[string]any{{"id": 2, "episode_number": 2, "name": "Episode Two", "overview": "Second & plot", "air_date": "2023-06-23", "runtime": 42}, {"id": 3, "episode_number": 3, "name": "Episode Three", "overview": "Third plot", "air_date": "2023-06-24"}}})
 		default:
 			t.Errorf("unexpected TMDB request %s", r.URL.Path)
 			http.Error(w, "unexpected", 404)
@@ -111,20 +111,23 @@ func TestTVMetadataUsesSeriesAndEpisodeTMDBIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "电视剧", "国漫", titleFolder(details), "Season 01", "The Demon Hunter - S01E02.strm")
+	path3 := filepath.Join(filepath.Dir(path), "The Demon Hunter - S01E03.strm")
 	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		t.Fatal(err)
 	}
 	s := NewService(st, nil, client, nil, DirectoryConfig{STRMPath: root})
-	if err := s.writeMetadata(ctx, DirectoryConfig{STRMPath: root}, details, []store.MediaEntry{{STRMPath: path}}); err != nil {
+	if err := s.writeMetadata(ctx, DirectoryConfig{STRMPath: root}, details, []store.MediaEntry{{STRMPath: path}, {STRMPath: path3}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		path string
-		tag  string
-		id   int64
+		path    string
+		tag     string
+		id      int64
+		runtime int
 	}{
-		{filepath.Join(filepath.Dir(filepath.Dir(path)), "tvshow.nfo"), "tvshow", 229192},
-		{strings.TrimSuffix(path, ".strm") + ".nfo", "episodedetails", 2},
+		{filepath.Join(filepath.Dir(filepath.Dir(path)), "tvshow.nfo"), "tvshow", 229192, 0},
+		{strings.TrimSuffix(path, ".strm") + ".nfo", "episodedetails", 2, 42},
+		{strings.TrimSuffix(path3, ".strm") + ".nfo", "episodedetails", 3, 42},
 	} {
 		data, err := os.ReadFile(test.path)
 		if err != nil {
@@ -137,7 +140,7 @@ func TestTVMetadataUsesSeriesAndEpisodeTMDBIDs(t *testing.T) {
 		if nfo.XMLName.Local != test.tag || nfo.IDs[0].Value != test.id {
 			t.Fatalf("wrong provider IDs %#v", nfo)
 		}
-		if test.tag == "episodedetails" && nfo.Runtime != 42 {
+		if test.tag == "episodedetails" && nfo.Runtime != test.runtime {
 			t.Fatalf("episode runtime missing: %#v", nfo)
 		}
 	}

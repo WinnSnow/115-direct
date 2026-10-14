@@ -283,6 +283,9 @@ func (s *Service) writeMetadata(ctx context.Context, cfg DirectoryConfig, detail
 			found = true
 			runtime := info.Runtime
 			if runtime <= 0 {
+				runtime = seasonRuntime(season.Episodes)
+			}
+			if runtime <= 0 {
 				runtime = details.Runtime
 			}
 			episodeNFO := metadataNFO{XMLName: xml.Name{Local: "episodedetails"}, Title: info.Title, ShowTitle: details.Title,
@@ -304,6 +307,22 @@ func (s *Service) writeMetadata(ctx context.Context, cfg DirectoryConfig, detail
 	}
 	s.Store.Audit(ctx, "scrape", fmt.Sprintf("刮削完成 %s (%s/%d)，%d 个文件", details.Title, details.Kind, details.ID, len(media)))
 	return nil
+}
+
+func seasonRuntime(episodes []tmdb.EpisodeDetails) int {
+	counts := map[int]int{}
+	for _, episode := range episodes {
+		if episode.Runtime > 0 {
+			counts[episode.Runtime]++
+		}
+	}
+	best, bestCount := 0, 0
+	for runtime, count := range counts {
+		if count > bestCount || (count == bestCount && (best == 0 || runtime < best)) {
+			best, bestCount = runtime, count
+		}
+	}
+	return best
 }
 
 func validateMetadataDir(root, dir string) error {
