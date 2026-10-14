@@ -281,8 +281,12 @@ func (s *Service) writeMetadata(ctx context.Context, cfg DirectoryConfig, detail
 				continue
 			}
 			found = true
+			runtime := info.Runtime
+			if runtime <= 0 {
+				runtime = details.Runtime
+			}
 			episodeNFO := metadataNFO{XMLName: xml.Name{Local: "episodedetails"}, Title: info.Title, ShowTitle: details.Title,
-				Plot: info.Overview, Aired: info.Date, Rating: info.Rating, Season: &ep.Season, Episode: &ep.Start,
+				Plot: info.Overview, Aired: info.Date, Rating: info.Rating, Runtime: runtime, Season: &ep.Season, Episode: &ep.Start,
 				IDs: []uniqueID{{Type: "tmdb", Default: "true", Value: info.ID}}}
 			if err := writeNFO(strings.TrimSuffix(path, filepath.Ext(path))+".nfo", episodeNFO); err != nil {
 				return err
@@ -291,7 +295,7 @@ func (s *Service) writeMetadata(ctx context.Context, cfg DirectoryConfig, detail
 		}
 		if !found {
 			// Unreleased episodes must not inherit metadata from a different episode.
-			fallback := metadataNFO{XMLName: xml.Name{Local: "episodedetails"}, Title: fmt.Sprintf("第 %d 集", ep.Start), ShowTitle: details.Title, Season: &ep.Season, Episode: &ep.Start}
+			fallback := metadataNFO{XMLName: xml.Name{Local: "episodedetails"}, Title: fmt.Sprintf("第 %d 集", ep.Start), ShowTitle: details.Title, Runtime: details.Runtime, Season: &ep.Season, Episode: &ep.Start}
 			if err := writeNFO(strings.TrimSuffix(path, filepath.Ext(path))+".nfo", fallback); err != nil {
 				return err
 			}

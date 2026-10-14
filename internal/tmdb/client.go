@@ -181,6 +181,7 @@ type EpisodeDetails struct {
 	Overview  string  `json:"overview"`
 	Date      string  `json:"air_date"`
 	Rating    float64 `json:"vote_average"`
+	Runtime   int     `json:"runtime"`
 	StillPath string  `json:"still_path"`
 }
 
