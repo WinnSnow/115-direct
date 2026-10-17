@@ -10,12 +10,54 @@ Jellyfin 客户端连接播放网关，而不是直接连接后端 Jellyfin。11
 
 ## 设置
 
-系统设置中的“播放直链”独立于“115 目录”中的后台网关地址：
+系统设置按用途展示播放相关配置：
+
+- **Jellyfin 服务器**：填写媒体服务器的主机、端口和 API Key，默认端口为 `8096`。
+- **目录配置 → 播放代理端口**：显示服务实际监听的端口，默认 `9096`。该端口代理上面配置的 Jellyfin 服务，播放器通过此代理访问媒体库和播放接口。端口由部署配置 `GATEWAY_ADDR` 管理；Docker 部署的播放器使用映射到宿主机的端口。
+- **高级设置 → 自定义 STRM 连接地址**：保留独立部署时使用的内部连接地址，例如 `http://direct:9096`。已有配置继续用于生成 STRM，普通目录配置无需填写域名或容器名。
+
+“高级设置 → 播放链路”还包括：
 
 - 客户端公网地址：填写客户端实际连接的根地址，例如 `https://media.example.com`。用于生成 PlaybackInfo 的绝对地址，避免穿透服务改写 Host 导致内部地址泄漏。留空时使用本次请求的 Host 与协议，不使用任意 `X-Forwarded-Host`。
 - 播放前检查 CDN：默认关闭。启用后按实际客户端 UA 做 `Range: bytes=0-0` 检查，只读一个字节，不携带 Cookie 或用户授权头、不跟随额外重定向。成功检查缓存一分钟，避免每次播放重复检查。
 
 所有取链及检查请求经过同一个串行队列，相同媒体与 UA 合并并发请求。缓存失效时重新取链；明确过期或 CDN 返回 401/403/404/410 时最多重试一次。115 API 请求失败、限流、CDN 网络异常等不会无限重试，不回退代理视频。后台元数据探测保留。
+
+## Jellyfin 地址与后台探测
+
+“Jellyfin 服务器”支持宿主机地址（例如 `http://192.168.31.135:8096`）和容器服务地址（例如 `http://jellyfin:8096`）。Docker 端口映射下，服务器的访问地址可能与它回访播放代理时的来源地址不同。
+
+后台读取 STRM 使用文件中的专用签名，无需播放器用户登录。网关先验证媒体签名与后台签名，再匹配已配置的服务器地址。来源不同时，通过已配置的后端和管理员 API Key 请求 `/System/Info`，确认服务器报告的内部地址。结果缓存一分钟，修改后端地址或 API Key 后重新查询；该请求不跟随重定向，也不向请求来源地址发送 API Key。
+
+原片直链入口的授权失败会在响应头 `X-115-Direct-Error` 和播放事件阶段中记录具体原因：
+
+| 状态 | 阶段 | 原因 |
+| --- | --- | --- |
+| 401 | `login_required` / `token_rejected` | 未携带登录令牌，或令牌失效 |
+| 401 | `backend_signature_invalid` | 后台探测签名无效 |
+| 403 | `playback_forbidden` | 用户缺少播放权限 |
+| 403 | `backend_origin_mismatch` | 请求来源不属于已确认的 Jellyfin 地址 |
+| 502 | `backend_origin_unavailable` / `user_authorization_unavailable` | 后端地址验证或用户授权服务异常 |
+
+## 播放请求计时
+
+播放信息、原片入口和播放上报请求会记录 `gateway request` 日志。每条请求分配独立的 `request_id`，也通过响应头 `X-115-Direct-Request-ID` 返回；日志不包含查询参数、用户令牌或签名直链。
+
+- `request_started` / `request_finished`：同一请求在网关内的进入和处理结束时间。
+- `elapsed_ms`：网关进入到处理结束的实测耗时，包含等待上游接口及原有日志写入的时间；在写入本条计时日志前采样。
+- `headers_ready_ms`：进入网关到调用最终响应 `WriteHeader` 的耗时。`Server-Timing` 响应头的 `gateway` 指标使用此值。它不表示客户端收到响应或视频首帧的时刻。
+- `authorization_ms` / `media_lookup_ms` / `settings_ms` / `link_resolve_ms`：鉴权、媒体查询、播放设置读取和本次请求等待直链结果的耗时。
+- `backend_headers_ms` / `backend_calls`：请求 Jellyfin 到收到响应头的累计等待和调用次数；不包含读取响应体的时间。此等待可能包含在鉴权阶段内，不能与所有阶段直接相加。
+- `playback_info_rewrite_ms`：读取、解析和改写 Jellyfin 播放信息响应体的耗时。
+- `link_job_queue_ms` / `link_job_115_ms` / `link_job_cdn_ms`：取链任务的排队、请求 115 及 CDN 检查耗时。`cache=shared` 时它们描述共享任务的完整工作，实际归属于本次请求的等待使用 `link_resolve_ms`；缓存命中时这些任务耗时为零。
+
+这些指标用于测量具体请求，不将不同请求之间的时间间隔归为网关处理耗时；并行请求的耗时也不应直接求和作为用户等待时间。
+
+## 减少 Jellyfin 重复探测
+
+Jellyfin 12.1 会在 STRM 的 PlaybackInfo 请求中强制刷新媒体信息，即使已有有效的音视频信息。本项目提供 [Jellyfin 播放扩展](../extensions/jellyfin-playback/README.md)，安装到 Jellyfin 后可以复用指纹未变、24 小时内验证过的媒体信息；需要探测时先使用 5MB 小采样，信息不足再扩大到 20MB。
+
+该扩展保留 Jellyfin 原有播放响应生成流程，配置范围仅包含本项目 STRM。文档包含编译、安装、强制刷新、回滚方式及按请求 ID 记录的修复前后耗时。
 
 ## 单文件诊断
 

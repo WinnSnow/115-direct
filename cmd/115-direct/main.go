@@ -174,7 +174,7 @@ func main() {
 	gateway.BackendHTTP = &http.Client{Transport: gateway.BackendTransport, Timeout: 15 * time.Second}
 	cmsRuntime := &jellyfin.CMSRuntime{Store: st}
 	gateway.CMSLoader = cmsRuntime.Bridge
-	api := &httpapi.Server{CMS: cmsRuntime, CMSListen: cfg.CMSLegacyAddr, MigrationReadOnly: migrationReadOnly, Store: st, Pan: pan, Jobs: jobs, TMDB: tmdbClient, Jellyfin: jellyClient, Gateway: gateway, WeCom: wecomHandler, Auth: auth, Sync: syncService, Upload: uploadService, STRMRoot: cfg.STRMPath()}
+	api := &httpapi.Server{CMS: cmsRuntime, CMSListen: cfg.CMSLegacyAddr, GatewayListen: cfg.GatewayAddr, MigrationReadOnly: migrationReadOnly, Store: st, Pan: pan, Jobs: jobs, TMDB: tmdbClient, Jellyfin: jellyClient, Gateway: gateway, WeCom: wecomHandler, Auth: auth, Sync: syncService, Upload: uploadService, STRMRoot: cfg.STRMPath()}
 	if !migrationReadOnly {
 		if err := api.RecoverUploadSessions(context.Background()); err != nil {
 			slog.Error("upload session recovery", "error", err)

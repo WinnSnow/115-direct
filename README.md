@@ -89,6 +89,8 @@ Jellyfin 客户端必须通过 `9096` 网关访问。网关保留普通 Jellyfin
 
 播放网关支持带扩展名的直链地址、音频和下载入口、串行取链及一次失效重试。管理台提供 STRM 单文件诊断、播放事件和可选 CDN 轻量检查，详见 [播放诊断](docs/PLAYBACK.md)。
 
+针对 Jellyfin 12.1 每次播放 STRM 都重新探测的问题，可单独安装 [播放探测扩展](extensions/jellyfin-playback/README.md)：复用有效媒体信息，必要时使用 5MB/20MB 两档采样。扩展需要安装在 Jellyfin，单独升级 115 Direct 不会自动启用；安装、强制刷新及逐请求实测见扩展说明。[2026-10-18 更新说明](docs/UPGRADE.md#2026-10-18-播放修复)记录本次修复范围和验收方法。
+
 ## 数据与安全
 
 - `ADMIN_PASSWORD` 没有代码内默认值，必须在 `.env` 或服务环境中设置；`ADMIN_USERNAME`、监听地址和公网网关同样可在配置文件编辑。

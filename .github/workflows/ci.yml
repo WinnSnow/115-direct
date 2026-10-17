@@ -30,3 +30,31 @@ jobs:
       - run: go test ./...
       - run: go vet ./...
       - run: go build ./cmd/115-direct
+
+  jellyfin-playback:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Extract references from the verified Jellyfin 12.1 image
+        run: |
+          mkdir -p "$RUNNER_TEMP/jellyfin"
+          docker create --name jellyfin-build-refs jellyfin/jellyfin@sha256:78d3ea1207d1322471fcac39a614f004f2ccf7e878f95ab2977d752f07e4dd7e
+          docker cp jellyfin-build-refs:/jellyfin/. "$RUNNER_TEMP/jellyfin/"
+      - name: Build playback extension
+        run: dotnet build extensions/jellyfin-playback/DirectPlayback.csproj -c Release -p:JellyfinDir="$RUNNER_TEMP/jellyfin" -o "$RUNNER_TEMP/playback-build"
+      - name: Test playback policy and service wrappers
+        run: dotnet run --project extensions/jellyfin-playback/tests/PolicyTests.csproj -c Release -p:JellyfinDir="$RUNNER_TEMP/jellyfin"
+      - name: Package playback extension
+        run: |
+          mkdir -p "$RUNNER_TEMP/playback-package"
+          cp "$RUNNER_TEMP/playback-build/DirectPlayback.dll" extensions/jellyfin-playback/meta.json extensions/jellyfin-playback/README.md "$RUNNER_TEMP/playback-package/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jellyfin-playback-12.1
+          path: ${{ runner.temp }}/playback-package/
+      - name: Remove reference container
+        if: always()
+        run: docker rm -f jellyfin-build-refs

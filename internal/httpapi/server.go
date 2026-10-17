@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -43,6 +44,7 @@ type Server struct {
 	Upload            *uploader.Service
 	CMS               *jellyfin.CMSRuntime
 	CMSListen         string
+	GatewayListen     string
 	MigrationReadOnly bool
 	STRMRoot          string
 }
@@ -399,6 +401,16 @@ func (s *Server) getSetting(w http.ResponseWriter, r *http.Request) {
 	if key == "directories" && s.Jobs != nil {
 		raw, _ := json.Marshal(s.Jobs.Directories(r.Context()))
 		_ = json.Unmarshal(raw, &value)
+	}
+	if key == "directories" {
+		if _, port, err := net.SplitHostPort(s.GatewayListen); err == nil {
+			if number, err := strconv.Atoi(port); err == nil && number > 0 && number <= 65535 {
+				if value == nil {
+					value = map[string]any{}
+				}
+				value["playback_port"] = number
+			}
+		}
 	}
 	if key == "organization" && s.Jobs != nil {
 		raw, _ := json.Marshal(s.Jobs.Options(r.Context()))

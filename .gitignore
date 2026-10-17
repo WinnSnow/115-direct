@@ -25,3 +25,5 @@ runtime/
 .vscode/
 scripts/__pycache__/
 web/ScreenShot_*.png
+extensions/**/bin/
+extensions/**/obj/

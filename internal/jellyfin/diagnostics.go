@@ -98,7 +98,12 @@ func (g *Gateway) recordDelivery(r *http.Request, id, mode string, status int, r
 	if cdn != nil {
 		host = cdn.Hostname()
 	}
-	slog.Info("media delivery", "media", id, "mode", mode, "cdn_host", host, "client", clientName(r), "status", status, "cache", result.Cache, "attempts", result.Attempts, "stage", result.Stage, "backend_probe", probe)
+	requestID := ""
+	if timing := requestTiming(r.Context()); timing != nil {
+		requestID = timing.id
+		timing.mediaID = id
+	}
+	slog.Info("media delivery", "request_id", requestID, "media", id, "mode", mode, "cdn_host", host, "client", clientName(r), "status", status, "cache", result.Cache, "attempts", result.Attempts, "stage", result.Stage, "backend_probe", probe)
 	if probe {
 		return
 	}

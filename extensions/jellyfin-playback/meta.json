@@ -1,0 +1,9 @@
+{
+  "guid": "2bfd1b9e-45e4-4ec9-9ecf-dc1115ee0096",
+  "name": "115 Direct Playback",
+  "description": "Reuse unchanged 115 Direct STRM metadata and bound necessary probes.",
+  "version": "0.1.0.0",
+  "targetAbi": "12.1.0.0",
+  "status": "Active",
+  "autoUpdate": false
+}

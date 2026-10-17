@@ -291,7 +291,11 @@ func TestConfiguredJellyfinBackendCanProbeSignedSTRM(t *testing.T) {
 			mutate(req)
 			w := httptest.NewRecorder()
 			gateway.ServeHTTP(w, req)
-			if w.Code != http.StatusUnauthorized {
+			want := http.StatusUnauthorized
+			if name == "wrong source" {
+				want = http.StatusForbidden
+			}
+			if w.Code != want {
 				t.Fatalf("status: %d", w.Code)
 			}
 		})

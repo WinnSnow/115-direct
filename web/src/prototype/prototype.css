@@ -600,3 +600,7 @@ body {
 .delete-preview-list code { overflow: hidden; color: var(--board-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .delete-preview-list small { color: #d8a15a; font-size: 12px; line-height: 1.4; }
 @media (max-width: 780px) { .organize-table .organize-head, .organize-table .organize-row { min-width: 1100px; } .match-id-form { grid-template-columns: 1fr; align-items: stretch; } .match-id-form .board-button { width: 100%; } .organize-batchbar span { flex-basis: 100%; order: -1; margin-right: 0; } .tmdb-preview-card { grid-template-columns: 72px minmax(0, 1fr); } .tmdb-preview-poster { width: 72px; height: 104px; } }
+
+.playback-port-help { color: var(--board-muted); font-size: 13px; font-weight: 400; line-height: 1.6; }
+.playback-connection-settings summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+.playback-connection-settings .settings-grid { margin: 14px 0; }

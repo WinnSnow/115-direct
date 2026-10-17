@@ -14,11 +14,14 @@ import (
 var errLinkExpired = errors.New("CDN URL expired")
 
 type linkResult struct {
-	URL         string
-	Cache       string
-	Attempts    int
-	ProbeStatus int
-	Stage       string
+	URL              string
+	Cache            string
+	Attempts         int
+	ProbeStatus      int
+	Stage            string
+	QueueDuration    time.Duration
+	DownloadDuration time.Duration
+	ProbeDuration    time.Duration
 }
 
 type probeError struct{ status int }
@@ -51,13 +54,17 @@ func (g *Gateway) resolveLink(ctx context.Context, pickCode, ua string, check bo
 		go func() {
 			work, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
+			queued := time.Now()
 			select {
 			case g.linkGate <- struct{}{}:
+				queueDuration := time.Since(queued)
 				f.result, f.err = g.fetchLink(work, key, pickCode, ua, check)
+				f.result.QueueDuration = queueDuration
 				<-g.linkGate
 			case <-work.Done():
 				f.err = work.Err()
 				f.result.Stage = "link_resolve"
+				f.result.QueueDuration = time.Since(queued)
 			}
 			g.mu.Lock()
 			delete(g.flights, flightKey)
@@ -100,11 +107,13 @@ func (g *Gateway) fetchLink(ctx context.Context, key, pickCode, ua string, check
 			var direct string
 			var headers map[string]string
 			var err error
+			started := time.Now()
 			if g.linkLookup != nil {
 				direct, headers, err = g.linkLookup(ctx, pickCode, ua)
 			} else {
 				direct, headers, err = g.Pan.DownloadURL(ctx, pickCode, ua)
 			}
+			result.DownloadDuration += time.Since(started)
 			if err != nil {
 				return result, errors.New("115 direct link request failed")
 			}
@@ -123,7 +132,9 @@ func (g *Gateway) fetchLink(ctx context.Context, key, pickCode, ua string, check
 		result.URL = cached.URL
 		if check && time.Since(cached.Checked) >= time.Minute {
 			result.Stage = "cdn_probe"
+			started := time.Now()
 			status, err := g.probeCDN(ctx, cached.URL, ua)
+			result.ProbeDuration += time.Since(started)
 			result.ProbeStatus = status
 			if err != nil {
 				lastErr = err

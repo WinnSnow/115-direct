@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>DirectPlayback</AssemblyName>
+    <Version>0.1.0</Version>
+    <JellyfinDir Condition="'$(JellyfinDir)' == ''">/jellyfin</JellyfinDir>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <Reference Include="$(JellyfinDir)/MediaBrowser.Common.dll" Private="false" />
+    <Reference Include="$(JellyfinDir)/MediaBrowser.Controller.dll" Private="false" />
+    <Reference Include="$(JellyfinDir)/MediaBrowser.Model.dll" Private="false" />
+    <Reference Include="$(JellyfinDir)/Jellyfin.Data.dll" Private="false" />
+    <Reference Include="$(JellyfinDir)/Jellyfin.Database.Implementations.dll" Private="false" />
+    <Reference Include="$(JellyfinDir)/Jellyfin.Extensions.dll" Private="false" />
+    <Compile Include="Plugin.cs;PlaybackPolicy.cs;ServiceProxy.cs" />
+  </ItemGroup>
+</Project>

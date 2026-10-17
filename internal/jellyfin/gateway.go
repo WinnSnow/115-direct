@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -41,6 +40,8 @@ type Gateway struct {
 	cache            map[string]cachedLink
 	flights          map[string]*flight
 	authCache        map[string]time.Time
+	backendMu        sync.Mutex
+	backendOrigin    cachedBackendOrigin
 	HTTP             *http.Client
 	BackendTransport http.RoundTripper
 	BackendHTTP      *http.Client
@@ -64,6 +65,11 @@ func (g *Gateway) cmsBridge(ctx context.Context) *CMSBridge {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if timedPlaybackPath(r.URL.Path) {
+		timed, request := beginPlaybackTiming(w, r)
+		w, r = timed, request
+		defer timed.finish(r)
+	}
 	if r.URL.Path == "/gateway/health" {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "running"})
 		return
@@ -96,7 +102,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	g.observePlayback(r)
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = g.BackendTransport
+	proxy.Transport = timedBackendTransport(g.BackendTransport)
 	baseDirector := proxy.Director
 	playbackInfo := strings.Contains(strings.ToLower(r.URL.Path), "/playbackinfo")
 	proxy.Director = func(req *http.Request) {
@@ -122,6 +128,7 @@ func (g *Gateway) rewritePlaybackInfo(resp *http.Response) error {
 }
 
 func (g *Gateway) rewritePlaybackInfoFor(resp *http.Response, viewer *http.Request) error {
+	defer addRequestTiming(viewer.Context(), "playback_info_rewrite", time.Now())
 	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Type"), "json") {
 		return nil
 	}
@@ -243,23 +250,40 @@ func (g *Gateway) direct(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) redirectMedia(w http.ResponseWriter, r *http.Request, id string) {
-	if err := g.authorizeDirectRequest(r, id); err != nil {
-		g.recordDelivery(r, id, "authorization_failed", http.StatusUnauthorized, linkResult{Stage: "authorization"}, false)
-		http.Error(w, "Jellyfin authorization required", http.StatusUnauthorized)
+	if timing := requestTiming(r.Context()); timing != nil {
+		timing.mediaID = id
+	}
+	started := time.Now()
+	authErr := g.authorizeDirectRequest(r, id)
+	addRequestTiming(r.Context(), "authorization", started)
+	if err := authErr; err != nil {
+		status, stage, message := directAuthorizationFailure(err)
+		g.recordDelivery(r, id, "authorization_failed", status, linkResult{Stage: stage}, false)
+		w.Header().Set("X-115-Direct-Error", stage)
+		http.Error(w, message, status)
 		return
 	}
+	started = time.Now()
 	media, err := g.Store.GetMedia(r.Context(), id)
+	addRequestTiming(r.Context(), "media_lookup", started)
 	if err != nil {
 		g.recordDelivery(r, id, "media_not_found", http.StatusNotFound, linkResult{Stage: "media_lookup"}, false)
 		http.NotFound(w, r)
 		return
 	}
+	started = time.Now()
 	options, err := g.playbackOptions(r.Context())
+	addRequestTiming(r.Context(), "settings", started)
 	if err != nil {
 		http.Error(w, "playback configuration unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	started = time.Now()
 	result, err := g.resolveLink(r.Context(), media.PickCode, r.UserAgent(), options.CheckLink)
+	addRequestTiming(r.Context(), "link_resolve", started)
+	if timing := requestTiming(r.Context()); timing != nil {
+		timing.link = result
+	}
 	if err != nil {
 		g.recordDelivery(r, id, "link_failed", http.StatusBadGateway, result, isBackendProbe(r))
 		http.Error(w, "cannot create direct link", http.StatusBadGateway)
@@ -275,48 +299,18 @@ func (g *Gateway) redirectMedia(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (g *Gateway) authorizeDirectRequest(r *http.Request, id string) error {
-	if err := g.authorize(r.Context(), jellyfinToken(r)); err == nil {
+	authErr := g.authorize(r.Context(), jellyfinToken(r))
+	if authErr == nil {
 		return nil
 	}
-	if !organize.VerifyJellyfinRequest(g.Secret, id, r.URL.Query().Get("jellyfin_sig")) {
-		return fmt.Errorf("missing Jellyfin backend signature")
+	signature := r.URL.Query().Get("jellyfin_sig")
+	if signature == "" {
+		return authErr
 	}
-	if !g.isConfiguredJellyfinHost(r.Context(), r.RemoteAddr) {
-		return fmt.Errorf("request did not originate from Jellyfin")
+	if !organize.VerifyJellyfinRequest(g.Secret, id, signature) {
+		return errBackendSignature
 	}
-	return nil
-}
-
-func (g *Gateway) isConfiguredJellyfinHost(ctx context.Context, remoteAddress string) bool {
-	host, _, err := net.SplitHostPort(remoteAddress)
-	if err != nil {
-		return false
-	}
-	remoteIP := net.ParseIP(host)
-	if remoteIP == nil {
-		return false
-	}
-	cfg, err := g.Config(ctx)
-	if err != nil {
-		return false
-	}
-	target, err := url.Parse(cfg.URL)
-	if err != nil || target.Hostname() == "" {
-		return false
-	}
-	if targetIP := net.ParseIP(target.Hostname()); targetIP != nil {
-		return targetIP.Equal(remoteIP)
-	}
-	addresses, err := net.DefaultResolver.LookupIP(ctx, "ip", target.Hostname())
-	if err != nil {
-		return false
-	}
-	for _, address := range addresses {
-		if address.Equal(remoteIP) {
-			return true
-		}
-	}
-	return false
+	return g.authorizeBackendOrigin(r.Context(), r.RemoteAddr)
 }
 
 func (g *Gateway) tryDirectMediaRequest(w http.ResponseWriter, r *http.Request, cfg Config) bool {
@@ -352,7 +346,7 @@ func (g *Gateway) tryDirectMediaRequest(w http.ResponseWriter, r *http.Request, 
 	if client == nil {
 		client = g.HTTP
 	}
-	resp, err := client.Do(req)
+	resp, err := timedBackendClient(client, r.Context()).Do(req)
 	if err != nil {
 		http.Error(w, "media source lookup failed", http.StatusBadGateway)
 		return true
@@ -489,7 +483,7 @@ func queryFold(values url.Values, key string) string {
 
 func (g *Gateway) authorize(ctx context.Context, token string) error {
 	if token == "" {
-		return fmt.Errorf("missing token")
+		return errMissingJellyfinToken
 	}
 	g.mu.Lock()
 	if until := g.authCache[token]; time.Now().Before(until) {
@@ -510,21 +504,30 @@ func (g *Gateway) authorize(ctx context.Context, token string) error {
 	if client == nil {
 		client = g.HTTP
 	}
-	resp, err := client.Do(req)
+	resp, err := timedBackendClient(client, ctx).Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return errInvalidJellyfinToken
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return errPlaybackForbidden
+	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Jellyfin rejected token")
+		return fmt.Errorf("Jellyfin user authorization HTTP %d", resp.StatusCode)
 	}
 	var user struct {
 		Policy struct {
 			EnableMediaPlayback bool `json:"EnableMediaPlayback"`
 		} `json:"Policy"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&user) != nil || !user.Policy.EnableMediaPlayback {
-		return fmt.Errorf("playback is not allowed")
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&user); err != nil {
+		return fmt.Errorf("invalid Jellyfin user authorization response")
+	}
+	if !user.Policy.EnableMediaPlayback {
+		return errPlaybackForbidden
 	}
 	g.mu.Lock()
 	g.authCache[token] = time.Now().Add(time.Minute)
